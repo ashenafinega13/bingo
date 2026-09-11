@@ -20,7 +20,7 @@ export function numberLetter(n: number): string {
 
 export class CardGenerator {
   static generate(): Card {
-    const card: Card[] = [[], [], [], [], []] as any;
+    const card: Card = [[], [], [], [], []] as Card;
     COLUMN_LETTERS.forEach((letter, col) => {
       const [low, high] = LETTER_RANGES[letter];
       const pool: number[] = [];
@@ -33,6 +33,6 @@ export class CardGenerator {
       for (let row = 0; row < 5; row++) card[row][col] = pool[row];
     });
     card[2][2] = "FREE";
-    return card as Card;
+    return card;
   }
 }
