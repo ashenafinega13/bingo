@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Wallet, History, Gamepad2, Users, Coins, RefreshCw, ArrowDownToLine, ArrowUpFromLine, X, User, Send, Share2, LifeBuoy, ChevronLeft, Menu } from "lucide-react";
+import { Wallet, History, Gamepad2, Users, Coins, RefreshCw, ArrowDownToLine, ArrowUpFromLine, User, Send, Share2, LifeBuoy, ChevronLeft, Menu } from "lucide-react";
 import { useGameSocket } from "./useGameSocket";
 
 // Since the backend now serves this frontend directly (see index.ts),
@@ -22,37 +22,58 @@ function myTelegramId() {
   return window?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
 }
 
-function BallChip({ number, size = "lg" }) {
+function BallChip({ number, size = "lg", bounce = false }) {
   const dims = size === "lg" ? "w-20 h-20 text-3xl" : "w-11 h-11 text-sm";
+  const letter = numberLetter(number);
+  // Distinct color per column, matching the classic B-I-N-G-O caller board
+  // look — also makes it instantly obvious which column a call belongs to.
+  const colors = {
+    B: "bg-blue-500 text-white",
+    I: "bg-violet-500 text-white",
+    N: "bg-fuchsia-500 text-white",
+    G: "bg-green-500 text-white",
+    O: "bg-orange-500 text-white",
+  };
   return (
     <div
-      className={`${dims} rounded-full bg-amber-400 text-emerald-950 flex flex-col items-center justify-center font-bold shrink-0 shadow-lg`}
+      className={`${dims} ${colors[letter] || "bg-amber-400 text-emerald-950"} rounded-full flex flex-col items-center justify-center font-bold shrink-0 shadow-lg ${bounce ? "animate-bounce" : ""}`}
       style={{ fontFamily: "'JetBrains Mono', monospace" }}
     >
-      <span className={size === "lg" ? "text-xs font-semibold opacity-70 -mb-1" : "text-[9px] opacity-70 -mb-0.5"}>
-        {numberLetter(number)}
+      <span className={size === "lg" ? "text-xs font-semibold opacity-80 -mb-1" : "text-[9px] opacity-80 -mb-0.5"}>
+        {letter}
       </span>
       <span>{number}</span>
     </div>
   );
 }
 
-function GameHeader({ drawn, playerCount, potCents }) {
+function StatBox({ label, value }) {
+  return (
+    <div className="bg-emerald-950/50 rounded-lg px-2 py-1.5 text-center flex-1">
+      <div className="text-emerald-400 text-[10px] leading-tight">{label}</div>
+      <div className="text-stone-50 font-bold text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function GameHeader({ gameId, drawn, calledCount, playerCount, potCents, entryFeeCents }) {
   const current = drawn[drawn.length - 1];
   const previous = drawn.slice(-4, -1).reverse(); // 3 most recent calls before the current one
 
   return (
     <div className="bg-emerald-900 rounded-2xl p-4 flex flex-col items-center gap-3">
-      <div className="flex items-center gap-2 self-start">
-        <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500" />
-        </span>
-        <span className="text-emerald-200 text-sm">Live</span>
+      <div className="w-full flex gap-2">
+        <StatBox label="Game ID" value={gameId || "—"} />
+        <StatBox label="Players" value={playerCount} />
+        <StatBox label="Bet" value={`${(entryFeeCents / 100).toFixed(0)}`} />
+        <StatBox label="Derash" value={`${(potCents / 100).toFixed(0)}`} />
+        <StatBox label="Called" value={calledCount} />
       </div>
 
       {current ? (
-        <BallChip number={current} size="lg" />
+        <BallChip number={current} size="lg" bounce />
       ) : (
         <div className="w-20 h-20 rounded-full border-2 border-dashed border-emerald-700 flex items-center justify-center text-emerald-500 text-xs text-center px-2">
           waiting for first call
@@ -65,31 +86,46 @@ function GameHeader({ drawn, playerCount, potCents }) {
           <BallChip key={i} number={n} size="sm" />
         ))}
       </div>
-
-      <div className="w-full grid grid-cols-2 gap-3 pt-2 border-t border-emerald-800">
-        <div className="flex items-center gap-2">
-          <Users size={16} className="text-emerald-300" />
-          <div>
-            <div className="text-emerald-400 text-xs">Players</div>
-            <div className="text-stone-50 font-semibold text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-              {playerCount}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Coins size={16} className="text-amber-400" />
-          <div>
-            <div className="text-emerald-400 text-xs">Take-home</div>
-            <div className="text-stone-50 font-semibold text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-              {(potCents / 100).toFixed(0)} ETB
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
 
+
+function CartelaBoard({ poolSize, taken, selected, onSelect }) {
+  const numbers = Array.from({ length: poolSize }, (_, i) => i + 1);
+  return (
+    <div className="bg-emerald-900/60 rounded-2xl p-3">
+      <div className="grid grid-cols-8 gap-1.5 max-h-72 overflow-y-auto">
+        {numbers.map((n) => {
+          const isTaken = taken.has(n) && n !== selected;
+          const isSelected = n === selected;
+          return (
+            <button
+              key={n}
+              disabled={isTaken}
+              onClick={() => onSelect(n)}
+              className={`aspect-square rounded-md text-xs font-semibold flex items-center justify-center transition-colors ${
+                isSelected
+                  ? "bg-amber-400 text-emerald-950 ring-2 ring-amber-200"
+                  : isTaken
+                  ? "bg-emerald-950/80 text-emerald-700 cursor-not-allowed"
+                  : "bg-emerald-800 text-emerald-100 hover:bg-emerald-700"
+              }`}
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {n}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex gap-4 justify-center pt-3 text-[11px] text-emerald-300">
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-800 inline-block" /> Available</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-950/80 inline-block" /> Taken</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-amber-400 inline-block" /> Yours</span>
+      </div>
+    </div>
+  );
+}
 
 function CartelaGrid({ card, drawnSet, dimmed }) {
   if (!card) return null;
@@ -184,30 +220,44 @@ function TierSelect({ tiers, onSelect }) {
   );
 }
 
-function WinnerPopup({ winner, myId, onClose }) {
-  if (!winner) return null;
-  const isMe = winner.winnerId === myId;
+function WinnerPopup({ winners, myId, gameId, autoRestartSeconds, onPlayNow }) {
+  if (!winners) return null;
+  const iWon = winners.some((w) => w.telegramId === myId);
+  const multi = winners.length > 1;
+
   return (
     <div className="fixed inset-0 bg-black/70 flex items-end sm:items-center justify-center z-50 p-4">
       <div className="bg-stone-50 rounded-2xl max-w-sm w-full p-6 text-center relative">
-        <button onClick={onClose} className="absolute top-3 right-3 text-emerald-900/40 hover:text-emerald-900">
-          <X size={20} />
-        </button>
         <div className="text-5xl mb-2">🏆</div>
         <h2 className="text-emerald-950 text-xl font-bold mb-1" style={{ fontFamily: "'Sora', sans-serif" }}>
-          {isMe ? "You won!" : `Player ${winner.winnerId} won!`}
+          BINGO! {multi ? `${winners.length} players won!` : iWon ? "You won!" : "We have a winner!"}
         </h2>
-        <p className="text-emerald-700 text-sm mb-4">{winner.pattern}</p>
-        <div
-          className="bg-amber-400 text-emerald-950 rounded-xl py-3 text-2xl font-bold mb-4"
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {isMe ? "+" : ""}
-          {(winner.payoutCents / 100).toFixed(0)} ETB
+        {gameId && <p className="text-emerald-500 text-xs mb-3">Game {gameId}</p>}
+
+        <div className="space-y-2 mb-4">
+          {winners.map((w) => {
+            const isMe = w.telegramId === myId;
+            return (
+              <div
+                key={w.telegramId}
+                className={`rounded-xl p-3 flex items-center justify-between ${isMe ? "bg-amber-100 ring-2 ring-amber-400" : "bg-emerald-50"}`}
+              >
+                <div className="text-left">
+                  <div className="font-semibold text-emerald-950">{isMe ? "You" : `Player ${w.telegramId}`}</div>
+                  <div className="text-emerald-600 text-xs">{w.pattern}</div>
+                </div>
+                <div className="font-bold text-emerald-900" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                  +{(w.payoutCents / 100).toFixed(0)} ETB
+                </div>
+              </div>
+            );
+          })}
         </div>
-        <button onClick={onClose} className="w-full bg-emerald-900 text-stone-50 rounded-xl py-3 font-semibold">
-          Play again
+
+        <button onClick={onPlayNow} className="w-full bg-emerald-900 text-stone-50 rounded-xl py-3 font-semibold mb-2">
+          Play again now
         </button>
+        <div className="text-emerald-600 text-xs">Auto-starting next game in {autoRestartSeconds}s</div>
       </div>
     </div>
   );
@@ -277,7 +327,7 @@ function HistoryView({ games }) {
 
 // Set this to your bot's real @username (no @) so the invite link and
 // share button actually point at your bot instead of a placeholder.
-const BOT_USERNAME = "realbingobot";
+const BOT_USERNAME = "your_bot_username";
 
 function MoreMenu({ onSelect, myId }) {
   const items = [
@@ -471,6 +521,10 @@ export default function CartelaMiniApp() {
   const [moreView, setMoreView] = useState("menu"); // menu | profile | transfer | invite | help
   const [lockedIn, setLockedIn] = useState(false);
   const [lockError, setLockError] = useState(null);
+  const [selectError, setSelectError] = useState(null);
+  const [currentTierKey, setCurrentTierKey] = useState(null);
+  const [autoRestartSeconds, setAutoRestartSeconds] = useState(null);
+  const [showBoard, setShowBoard] = useState(true); // toggles between the numbered board and the picked card
   const myId = myTelegramId();
 
   useEffect(() => {
@@ -484,7 +538,43 @@ export default function CartelaMiniApp() {
     if (game.phase === "idle") setLockedIn(false);
   }, [game.phase]);
 
+  // Once a round we're part of ends in a win, auto-advance into the next
+  // round (already open server-side) after a short countdown — mirrors
+  // "Auto-starting next game in Ns" instead of leaving the player stuck
+  // on the winner screen with nowhere to go.
+  useEffect(() => {
+    if (game.phase !== "CLOSED" || !game.winners || !currentTierKey) {
+      setAutoRestartSeconds(null);
+      return;
+    }
+    setAutoRestartSeconds(6);
+    const interval = setInterval(() => {
+      setAutoRestartSeconds((s) => {
+        if (s <= 1) {
+          clearInterval(interval);
+          game.joinTier(currentTierKey);
+          return null;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [game.phase, game.winners, currentTierKey]);
+
   const drawnSet = new Set(game.drawn);
+
+  const handleJoinTier = (tierKey) => {
+    setCurrentTierKey(tierKey);
+    setSelectError(null);
+    setShowBoard(true);
+    game.joinTier(tierKey);
+  };
+
+  const handleSelectCartela = (number) => {
+    setSelectError(null);
+    game.selectCartela(number, (err) => setSelectError(err));
+    setShowBoard(false);
+  };
 
   const handleLockIn = () => {
     setLockError(null);
@@ -492,12 +582,8 @@ export default function CartelaMiniApp() {
     setLockedIn(true);
   };
 
-  const handlePlayAgain = () => {
-    setLockedIn(false);
-    setLockError(null);
-    // useGameSocket resets phase to "idle" on room_cancelled, and to
-    // "CLOSED" after a win — either way, going back to tier selection
-    // just means not calling joinTier again until the user picks one.
+  const handlePlayNow = () => {
+    if (currentTierKey) game.joinTier(currentTierKey);
   };
 
   return (
@@ -515,7 +601,7 @@ export default function CartelaMiniApp() {
       <div className="flex-1 overflow-y-auto pb-20">
         {tab === "play" && (
           <div className="p-4 space-y-4">
-            {game.phase === "idle" && <TierSelect tiers={game.tiers} onSelect={game.joinTier} />}
+            {game.phase === "idle" && <TierSelect tiers={game.tiers} onSelect={handleJoinTier} />}
 
             {game.phase === "WAITING" && (
               <>
@@ -525,37 +611,60 @@ export default function CartelaMiniApp() {
                       Watching the current round — betting opens for the next one
                     </div>
                     <GameHeader
+                      gameId={game.spectate.gameId}
                       drawn={game.spectate.drawnNumbers}
+                      calledCount={game.spectate.drawnNumbers.length}
                       playerCount={game.spectate.playerCount}
                       potCents={game.spectate.potCents}
+                      entryFeeCents={game.entryFeeCents}
                     />
                   </div>
                 )}
 
                 <h1 className="text-stone-50 text-xl font-bold">Choose your Cartela</h1>
                 <RoomMetrics playerCount={game.playerCount} potCents={game.potCents} />
-                <CartelaGrid card={game.card} drawnSet={new Set()} />
-                {lockError && <div className="text-orange-400 text-sm">{lockError}</div>}
-                {!lockedIn ? (
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      onClick={game.refreshCard}
-                      className="bg-emerald-900 text-stone-50 rounded-xl py-3 flex items-center justify-center gap-2 font-semibold"
-                    >
-                      <RefreshCw size={18} />
-                      Refresh
-                    </button>
-                    <button
-                      onClick={handleLockIn}
-                      className="bg-amber-400 text-emerald-950 rounded-xl py-3 flex items-center justify-center gap-2 font-semibold"
-                    >
-                      Lock in ticket
-                    </button>
-                  </div>
-                ) : (
-                  <div className="text-center text-emerald-300 text-sm py-2">
-                    Ticket locked in — waiting for more players to join...
-                  </div>
+
+                {!lockedIn && showBoard && (
+                  <>
+                    {selectError && <div className="text-orange-400 text-sm">{selectError}</div>}
+                    <CartelaBoard
+                      poolSize={game.board.poolSize}
+                      taken={game.board.taken}
+                      selected={game.selectedCartela}
+                      onSelect={handleSelectCartela}
+                    />
+                  </>
+                )}
+
+                {!showBoard && game.selectedCartela !== null && (
+                  <>
+                    <div className="text-emerald-300 text-sm text-center">
+                      Cartela #{game.selectedCartela}
+                    </div>
+                    <CartelaGrid card={game.card} drawnSet={new Set()} />
+                    {lockError && <div className="text-orange-400 text-sm">{lockError}</div>}
+                    {!lockedIn ? (
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          onClick={() => setShowBoard(true)}
+                          className="bg-emerald-900 text-stone-50 rounded-xl py-3 flex items-center justify-center gap-2 font-semibold"
+                        >
+                          <RefreshCw size={18} />
+                          Change
+                        </button>
+                        <button
+                          onClick={handleLockIn}
+                          className="bg-amber-400 text-emerald-950 rounded-xl py-3 flex items-center justify-center gap-2 font-semibold"
+                        >
+                          Lock in ticket
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-center text-emerald-300 text-sm py-2">
+                        Ticket locked in — waiting for more players to join...
+                      </div>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -572,20 +681,35 @@ export default function CartelaMiniApp() {
                   </div>
                 </div>
                 <RoomMetrics playerCount={game.playerCount} potCents={game.potCents} />
+                <div className="text-emerald-300 text-sm text-center">Cartela #{game.selectedCartela}</div>
                 <CartelaGrid card={game.card} drawnSet={new Set()} />
               </>
             )}
 
             {game.phase === "IN_PROGRESS" && (
               <>
-                <GameHeader drawn={game.drawn} playerCount={game.playerCount} potCents={game.potCents} />
+                <GameHeader
+                  gameId={game.gameId}
+                  drawn={game.drawn}
+                  calledCount={game.calledCount}
+                  playerCount={game.playerCount}
+                  potCents={game.potCents}
+                  entryFeeCents={game.entryFeeCents}
+                />
                 <CartelaGrid card={game.card} drawnSet={drawnSet} />
               </>
             )}
 
             {game.phase === "CLOSED" && (
               <>
-                <GameHeader drawn={game.drawn} playerCount={game.playerCount} potCents={game.potCents} />
+                <GameHeader
+                  gameId={game.gameId}
+                  drawn={game.drawn}
+                  calledCount={game.calledCount}
+                  playerCount={game.playerCount}
+                  potCents={game.potCents}
+                  entryFeeCents={game.entryFeeCents}
+                />
                 <CartelaGrid card={game.card} drawnSet={drawnSet} dimmed />
               </>
             )}
@@ -610,7 +734,13 @@ export default function CartelaMiniApp() {
         )}
       </div>
 
-      <WinnerPopup winner={game.phase === "CLOSED" ? game.winner : null} myId={myId} onClose={handlePlayAgain} />
+      <WinnerPopup
+        winners={game.phase === "CLOSED" ? game.winners : null}
+        myId={myId}
+        gameId={game.gameId}
+        autoRestartSeconds={autoRestartSeconds}
+        onPlayNow={handlePlayNow}
+      />
 
       <div className="fixed bottom-0 inset-x-0 max-w-md mx-auto bg-emerald-900 border-t border-emerald-800 flex">
         {[

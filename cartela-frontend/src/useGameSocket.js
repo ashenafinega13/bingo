@@ -1,20 +1,19 @@
 /**
  * useGameSocket.js
  *
- * Connects the Mini App to the real Cartela backend. Replaces the
- * setInterval-based simulation block in CartelaMiniApp.jsx.
+ * Connects the Mini App to the real Cartela backend — numbered-cartela
+ * board version (pick a number 1..poolSize instead of a random/refresh
+ * card), enriched live-game header (Game ID, players, bet, take-home,
+ * called count), and multi-winner payout splitting.
  *
- * Usage inside CartelaMiniApp.jsx:
- *
- *   import { useGameSocket } from "./useGameSocket";
- *   const game = useGameSocket("https://your-backend-url.example.com");
- *
- * `game` exposes: connected, balanceCents, tiers, joinTier(tierKey),
- * refreshCard(), lockIn(), roomId, card, phase, secondsLeft, drawn,
- * playerCount, potCents, winner, mockDeposit(amountBirr), history, fetchHistory()
- *
- * See the integration notes at the bottom of this file for the exact
- * lines to change in CartelaMiniApp.jsx.
+ * `game` exposes:
+ *   connected, connectError, balanceCents, tiers, history, spectate,
+ *   roomId, gameId, phase, secondsLeft, entryFeeCents,
+ *   board ({ poolSize, taken: Set<number> }), selectedCartela, card,
+ *   playerCount, potCents, drawn, calledCount, winners (array | null),
+ *   joinTier(tierKey), selectCartela(number, onError), lockIn(onError),
+ *   mockDeposit(amountBirr), mockWithdraw(amountBirr, onError),
+ *   transfer(toTelegramId, amountBirr, onError, onSuccess), fetchHistory()
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -27,29 +26,33 @@ export function useGameSocket(backendUrl) {
   const [balanceCents, setBalanceCents] = useState(0);
   const [tiers, setTiers] = useState({});
   const [roomId, setRoomId] = useState(null);
+  const [gameId, setGameId] = useState(null);
+  const [entryFeeCents, setEntryFeeCents] = useState(0);
+  const [board, setBoard] = useState({ poolSize: 600, taken: new Set() });
+  const [selectedCartela, setSelectedCartela] = useState(null);
   const [card, setCard] = useState(null);
   const [phase, setPhase] = useState("idle"); // idle | WAITING | COUNTDOWN | IN_PROGRESS | CLOSED
   const [secondsLeft, setSecondsLeft] = useState(null);
   const [drawn, setDrawn] = useState([]);
+  const [calledCount, setCalledCount] = useState(0);
   const [playerCount, setPlayerCount] = useState(0);
   const [potCents, setPotCents] = useState(0);
-  const [winner, setWinner] = useState(null);
+  const [winners, setWinners] = useState(null); // array of {telegramId, pattern, cartelaCard, payoutCents, newBalanceCents} | null
   const [history, setHistory] = useState([]);
-  const [spectate, setSpectate] = useState(null); // { roomId, phase, drawnNumbers, playerCount, potCents } | null
+  const [spectate, setSpectate] = useState(null); // { roomId, gameId, phase, drawnNumbers, playerCount, potCents } | null
 
-  // Refs mirror the state above so the socket handlers below (registered
-  // once, in the effect's closure) always compare against the CURRENT
-  // roomId/spectate roomId, not whatever they were when the effect ran.
+  // Refs mirror state so socket handlers (registered once, in the effect's
+  // closure) always compare against the CURRENT roomId/spectate roomId.
   const roomIdRef = useRef(null);
   const spectateRoomIdRef = useRef(null);
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
   useEffect(() => { spectateRoomIdRef.current = spectate?.roomId || null; }, [spectate]);
 
+  function getMyTelegramId() {
+    return window?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  }
+
   useEffect(() => {
-    // window.Telegram.WebApp is injected automatically when this page is
-    // opened as a Telegram Mini App. It will be undefined if you're
-    // testing in a plain browser tab — see the deployment steps for how
-    // to test for real inside Telegram.
     const initData = window?.Telegram?.WebApp?.initData;
     if (!initData) {
       console.warn("No Telegram initData found — open this page via the bot's Menu Button to authenticate.");
@@ -57,10 +60,8 @@ export function useGameSocket(backendUrl) {
 
     const socket = io(backendUrl, {
       auth: { initData: initData || "" },
-      // ngrok's free tier shows an interstitial "you're about to visit"
-      // page to browsers by default, which can intercept Socket.io's
-      // polling handshake requests and make the connection hang forever
-      // with no visible error. This header tells ngrok to skip it.
+      // ngrok's free tier can inject a browser-warning interstitial that
+      // silently breaks Socket.io's polling handshake. This header skips it.
       extraHeaders: { "ngrok-skip-browser-warning": "true" },
     });
     socketRef.current = socket;
@@ -74,10 +75,12 @@ export function useGameSocket(backendUrl) {
 
     socket.on("wallet:balance", ({ balanceCents }) => setBalanceCents(balanceCents));
 
-    socket.on("player_count", ({ roomId: evRoomId, playerCount, potCents }) => {
-      if (evRoomId !== roomIdRef.current) return; // not our own bet-able room, ignore
+    socket.on("player_count", ({ roomId: evRoomId, playerCount, potCents, gameId, entryFeeCents }) => {
+      if (evRoomId !== roomIdRef.current) return;
       setPlayerCount(playerCount);
       setPotCents(potCents);
+      if (gameId) setGameId(gameId);
+      if (entryFeeCents !== undefined) setEntryFeeCents(entryFeeCents);
     });
 
     socket.on("phase_changed", ({ roomId: evRoomId, phase: newPhase, secondsLeft: sl }) => {
@@ -93,24 +96,39 @@ export function useGameSocket(backendUrl) {
       if (evRoomId === roomIdRef.current) setSecondsLeft(sl);
     });
 
-    socket.on("number_drawn", ({ roomId: evRoomId, drawnSoFar }) => {
+    socket.on("number_drawn", ({ roomId: evRoomId, drawnSoFar, calledCount: cc }) => {
       if (evRoomId === roomIdRef.current) {
         setDrawn(drawnSoFar);
+        setCalledCount(cc);
       } else if (evRoomId === spectateRoomIdRef.current) {
         setSpectate((prev) => (prev ? { ...prev, drawnNumbers: drawnSoFar } : prev));
       }
     });
 
+    // Someone (possibly us, from another tab/device) booked or released a
+    // numbered cartela in our own room — keep the board's taken-set live.
+    socket.on("cartela_taken", ({ roomId: evRoomId, cartelaNumber }) => {
+      if (evRoomId !== roomIdRef.current) return;
+      setBoard((prev) => ({ ...prev, taken: new Set(prev.taken).add(cartelaNumber) }));
+    });
+    socket.on("cartela_released", ({ roomId: evRoomId, cartelaNumber }) => {
+      if (evRoomId !== roomIdRef.current) return;
+      setBoard((prev) => {
+        const next = new Set(prev.taken);
+        next.delete(cartelaNumber);
+        return { ...prev, taken: next };
+      });
+    });
+
     socket.on("winner_confirmed", (payload) => {
       if (payload.roomId === roomIdRef.current) {
-        setWinner(payload);
+        setWinners(payload.winners);
         setPhase("CLOSED");
-        if (payload.winnerId === getMyTelegramId()) {
-          setBalanceCents(payload.winnerNewBalanceCents);
-        }
+        const mine = payload.winners.find((w) => w.telegramId === getMyTelegramId());
+        if (mine) setBalanceCents(mine.newBalanceCents);
       } else if (payload.roomId === spectateRoomIdRef.current) {
-        // The round we were only watching just ended — stop spectating.
-        // The player's own room (for the next round) is unaffected.
+        // The round we were only watching just ended — our own room (next
+        // round) is unaffected, just stop showing the spectate panel.
         setSpectate(null);
       }
     });
@@ -129,33 +147,36 @@ export function useGameSocket(backendUrl) {
     return () => socket.disconnect();
   }, [backendUrl]);
 
-  function getMyTelegramId() {
-    return window?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
-  }
-
   const joinTier = useCallback((tierKey) => {
     socketRef.current?.emit("tier:join", { tierKey }, (res) => {
       if (res.error) return console.error(res.error);
       setRoomId(res.roomId);
-      setCard(res.card);
-      setBalanceCents(res.balanceCents);
+      setGameId(res.gameId);
+      setBoard({ poolSize: res.poolSize, taken: new Set(res.taken) });
+      setSelectedCartela(null);
+      setCard(null);
       setDrawn([]);
-      setWinner(null);
+      setCalledCount(0);
+      setWinners(null);
       setPhase("WAITING");
       // If a round is already live for this tier, watch it read-only —
-      // no card, no bet, no ability to win — while this new room (for
-      // the NEXT round) is what the player can actually buy a ticket in.
+      // no card, no bet — while this new room (for the NEXT round) is
+      // what the player can actually pick a cartela and bet in.
       setSpectate(res.spectate || null);
     });
   }, []);
 
-  const refreshCard = useCallback(() => {
-    if (!roomId) return;
-    socketRef.current?.emit("cartela:refresh", { roomId }, (res) => {
-      if (res.error) return console.error(res.error);
-      setCard(res.card);
-    });
-  }, [roomId]);
+  const selectCartela = useCallback(
+    (cartelaNumber, onError) => {
+      if (!roomId) return;
+      socketRef.current?.emit("cartela:select", { roomId, cartelaNumber }, (res) => {
+        if (!res.ok) return onError?.(res.error);
+        setSelectedCartela(cartelaNumber);
+        setCard(res.card);
+      });
+    },
+    [roomId]
+  );
 
   const lockIn = useCallback(
     (onError) => {
@@ -199,17 +220,22 @@ export function useGameSocket(backendUrl) {
     balanceCents,
     tiers,
     roomId,
+    gameId,
+    entryFeeCents,
+    board,
+    selectedCartela,
     card,
     phase,
     secondsLeft,
     drawn,
+    calledCount,
     playerCount,
     potCents,
-    winner,
+    winners,
     history,
     spectate,
     joinTier,
-    refreshCard,
+    selectCartela,
     lockIn,
     mockDeposit,
     mockWithdraw,
@@ -217,32 +243,3 @@ export function useGameSocket(backendUrl) {
     fetchHistory,
   };
 }
-
-/**
- * ---- INTEGRATION NOTES for CartelaMiniApp.jsx ----
- *
- * 1. Add near the top:
- *      import { useGameSocket } from "./useGameSocket";
- *
- * 2. Inside the CartelaMiniApp component, replace the local useState/useEffect
- *    simulation block (phase, drawn, secondsLeft, playerCount, the "SIMULATION"
- *    useEffect, generateCard/checkWin calls) with:
- *      const game = useGameSocket("https://your-backend-url.example.com");
- *
- * 3. Replace references:
- *      card              -> game.card
- *      drawn             -> game.drawn
- *      phase             -> game.phase   (values now: "idle" | "WAITING" | "COUNTDOWN" | "IN_PROGRESS" | "CLOSED")
- *      secondsLeft        -> game.secondsLeft
- *      playerCount        -> game.playerCount
- *      potEtb             -> game.potCents / 100
- *      balance            -> game.balanceCents / 100
- *      winner             -> game.winner  (shape: { winnerId, pattern, payoutCents })
- *      handleRefresh()    -> game.refreshCard()
- *      "Lock in" button   -> game.lockIn(errorMsg => alert(errorMsg))
- *      handlePlayAgain()  -> game.joinTier(selectedTierKey) again, or reset to tier list
- *
- * 4. For the tier-selection screen, use game.tiers (an object keyed by tier
- *    key with { label, entryFeeCents }) instead of a hardcoded ENTRY_FEE_ETB,
- *    and call game.joinTier(tierKey) when the user picks one.
- */

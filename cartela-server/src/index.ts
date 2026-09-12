@@ -75,10 +75,10 @@ io.on("connection", (socket: Socket) => {
 
   socket.on("tier:join", (payload: { tierKey: string }, ack) => {
     if (!TIERS[payload.tierKey]) return ack?.({ error: "Unknown tier." });
-    const { roomId, card } = roomManager.joinTier(payload.tierKey, telegramId, socket);
+    const { roomId, poolSize, taken, gameId } = roomManager.joinTier(payload.tierKey, telegramId, socket);
     const spectate = roomManager.getSpectateSnapshot(payload.tierKey);
     if (spectate) roomManager.joinAsSpectator(spectate.roomId, socket);
-    ack?.({ roomId, card, balanceCents: db.getBalanceCents(telegramId), spectate });
+    ack?.({ roomId, poolSize, taken, gameId, balanceCents: db.getBalanceCents(telegramId), spectate });
   });
 
   socket.on("spectate:get", (payload: { tierKey: string }, ack) => {
@@ -87,21 +87,13 @@ io.on("connection", (socket: Socket) => {
     ack?.({ snapshot });
   });
 
-  socket.on("cartela:refresh", (payload: { roomId: string }, ack) => {
-    const card = roomManager.refreshCard(payload.roomId, telegramId);
-    if (!card) return ack?.({ error: "Can't refresh right now." });
-    ack?.({ card });
+  socket.on("cartela:select", (payload: { roomId: string; cartelaNumber: number }, ack) => {
+    const result = roomManager.selectCartela(payload.roomId, telegramId, payload.cartelaNumber);
+    ack?.(result);
   });
 
   socket.on("cartela:lock", (payload: { roomId: string }, ack) => {
     const result = roomManager.lockIn(payload.roomId, telegramId);
-    ack?.(result);
-  });
-
-  // Kept for a UI variant with a manual claim button — the RoomManager's
-  // automatic sweep after every draw is what the spec's auto-win flow uses.
-  socket.on("bingo:claim", (payload: { roomId: string }, ack) => {
-    const result = roomManager.claimBingo(payload.roomId, telegramId);
     ack?.(result);
   });
 
