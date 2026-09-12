@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Wallet, History, Gamepad2, Users, Coins, RefreshCw, ArrowDownToLine, ArrowUpFromLine, X } from "lucide-react";
+import { Wallet, History, Gamepad2, Users, Coins, RefreshCw, ArrowDownToLine, ArrowUpFromLine, X, User, Send, Share2, LifeBuoy, ChevronLeft, Menu } from "lucide-react";
 import { useGameSocket } from "./useGameSocket";
 
 // Since the backend now serves this frontend directly (see index.ts),
@@ -37,9 +37,9 @@ function BallChip({ number, size = "lg" }) {
   );
 }
 
-function LiveTicker({ drawn }) {
+function GameHeader({ drawn, playerCount, potCents }) {
   const current = drawn[drawn.length - 1];
-  const previous = drawn.slice(-5, -1).reverse();
+  const previous = drawn.slice(-4, -1).reverse(); // 3 most recent calls before the current one
 
   return (
     <div className="bg-emerald-900 rounded-2xl p-4 flex flex-col items-center gap-3">
@@ -65,9 +65,31 @@ function LiveTicker({ drawn }) {
           <BallChip key={i} number={n} size="sm" />
         ))}
       </div>
+
+      <div className="w-full grid grid-cols-2 gap-3 pt-2 border-t border-emerald-800">
+        <div className="flex items-center gap-2">
+          <Users size={16} className="text-emerald-300" />
+          <div>
+            <div className="text-emerald-400 text-xs">Players</div>
+            <div className="text-stone-50 font-semibold text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+              {playerCount}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Coins size={16} className="text-amber-400" />
+          <div>
+            <div className="text-emerald-400 text-xs">Take-home</div>
+            <div className="text-stone-50 font-semibold text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+              {(potCents / 100).toFixed(0)} ETB
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
+
 
 function CartelaGrid({ card, drawnSet, dimmed }) {
   if (!card) return null;
@@ -253,15 +275,207 @@ function HistoryView({ games }) {
   );
 }
 
+// Set this to your bot's real @username (no @) so the invite link and
+// share button actually point at your bot instead of a placeholder.
+const BOT_USERNAME = "realbingobot";
+
+function MoreMenu({ onSelect, myId }) {
+  const items = [
+    { key: "profile", label: "My Account", icon: User, blurb: `Telegram ID: ${myId || "unknown"}` },
+    { key: "transfer", label: "Transfer Funds", icon: Send, blurb: "Send balance to another player" },
+    { key: "invite", label: "Invite Friends", icon: Share2, blurb: "Share your invite link" },
+    { key: "help", label: "Help & Support", icon: LifeBuoy, blurb: "How to play, troubleshooting" },
+  ];
+  return (
+    <div className="p-4 space-y-3">
+      {items.map(({ key, label, icon: Icon, blurb }) => (
+        <button
+          key={key}
+          onClick={() => onSelect(key)}
+          className="w-full bg-emerald-900/60 hover:bg-emerald-900 rounded-xl p-4 flex items-center gap-3 text-left transition-colors"
+        >
+          <div className="bg-emerald-800 rounded-lg p-2">
+            <Icon size={20} className="text-amber-400" />
+          </div>
+          <div>
+            <div className="text-stone-50 font-semibold">{label}</div>
+            <div className="text-emerald-400 text-xs">{blurb}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BackHeader({ title, onBack }) {
+  return (
+    <div className="flex items-center gap-2 p-4 pb-2">
+      <button onClick={onBack} className="text-emerald-300 p-1 -ml-1">
+        <ChevronLeft size={22} />
+      </button>
+      <h2 className="text-stone-50 font-bold text-lg">{title}</h2>
+    </div>
+  );
+}
+
+function ProfileView({ myId, onBack }) {
+  return (
+    <div>
+      <BackHeader title="My Account" onBack={onBack} />
+      <div className="p-4 space-y-3">
+        <div className="bg-emerald-900/60 rounded-xl p-4">
+          <div className="text-emerald-400 text-xs mb-1">Telegram ID</div>
+          <div className="text-stone-50 font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+            {myId || "Not available outside Telegram"}
+          </div>
+        </div>
+        <div className="bg-emerald-900/60 rounded-xl p-4 text-sm text-emerald-200">
+          Your account was created automatically the moment you opened this Mini App through
+          Telegram — no separate registration step is needed. Share your Telegram ID above with
+          a friend if they want to send you a transfer.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransferView({ onBack, onTransfer }) {
+  const [toId, setToId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(false);
+
+  const handleSend = () => {
+    setError(null);
+    setSuccess(false);
+    const idNum = Number(toId);
+    const amountNum = Number(amount);
+    if (!idNum || idNum <= 0) return setError("Enter a valid Telegram ID.");
+    if (!amountNum || amountNum <= 0) return setError("Enter a valid amount.");
+    onTransfer(idNum, amountNum, setError, () => {
+      setSuccess(true);
+      setToId("");
+      setAmount("");
+    });
+  };
+
+  return (
+    <div>
+      <BackHeader title="Transfer Funds" onBack={onBack} />
+      <div className="p-4 space-y-3">
+        <input
+          type="number"
+          value={toId}
+          onChange={(e) => setToId(e.target.value)}
+          placeholder="Recipient's Telegram ID"
+          className="w-full bg-emerald-900/60 text-stone-50 rounded-xl p-3 outline-none placeholder:text-emerald-600"
+        />
+        <input
+          type="number"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="Amount in ETB"
+          className="w-full bg-emerald-900/60 text-stone-50 rounded-xl p-3 outline-none placeholder:text-emerald-600"
+        />
+        {error && <div className="text-orange-400 text-sm">{error}</div>}
+        {success && <div className="text-amber-400 text-sm">Transfer sent successfully!</div>}
+        <button onClick={handleSend} className="w-full bg-amber-400 text-emerald-950 rounded-xl py-3 font-semibold">
+          Send
+        </button>
+        <div className="bg-emerald-900/60 rounded-xl p-4 text-sm text-emerald-200">
+          The recipient must have opened this bot at least once before you can send them funds.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InviteView({ onBack, myId }) {
+  const link = `https://t.me/${BOT_USERNAME}?start=${myId || ""}`;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard?.writeText(link);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleShare = () => {
+    const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent("Come play Cartela Bingo with me!")}`;
+    if (window?.Telegram?.WebApp?.openTelegramLink) {
+      window.Telegram.WebApp.openTelegramLink(shareUrl);
+    } else {
+      window.open(shareUrl, "_blank");
+    }
+  };
+
+  return (
+    <div>
+      <BackHeader title="Invite Friends" onBack={onBack} />
+      <div className="p-4 space-y-3">
+        <div className="bg-emerald-900/60 rounded-xl p-4 break-all text-emerald-200 text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+          {link}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <button onClick={handleCopy} className="bg-emerald-900 text-stone-50 rounded-xl py-3 font-semibold">
+            {copied ? "Copied!" : "Copy link"}
+          </button>
+          <button onClick={handleShare} className="bg-amber-400 text-emerald-950 rounded-xl py-3 font-semibold">
+            Share
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HelpView({ onBack }) {
+  return (
+    <div>
+      <BackHeader title="Help & Support" onBack={onBack} />
+      <div className="p-4 space-y-3 text-sm">
+        <div className="bg-emerald-900/60 rounded-xl p-4">
+          <div className="text-amber-400 font-semibold mb-1">How to play</div>
+          <p className="text-emerald-200">
+            Pick a room, get a Cartela, and lock in your ticket. Once at least 2 players have
+            locked in, a countdown starts. Numbers are called automatically once it starts —
+            complete a row, column, diagonal, or all four corners to win instantly.
+          </p>
+        </div>
+        <div className="bg-emerald-900/60 rounded-xl p-4">
+          <div className="text-amber-400 font-semibold mb-1">How cards are drawn</div>
+          <p className="text-emerald-200">
+            Numbers 1–75 are drawn one at a time by the server, roughly once per second, with no
+            repeats until the round ends.
+          </p>
+        </div>
+        <div className="bg-emerald-900/60 rounded-xl p-4">
+          <div className="text-amber-400 font-semibold mb-1">How you win</div>
+          <p className="text-emerald-200">
+            The prize pool is every player's entry fee combined, minus a 10% house fee. It's paid
+            out automatically the instant a winning pattern is detected.
+          </p>
+        </div>
+        <div className="bg-emerald-900/60 rounded-xl p-4">
+          <div className="text-amber-400 font-semibold mb-1">Need more help?</div>
+          <p className="text-emerald-200">Contact support through this bot's chat directly.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CartelaMiniApp() {
   const game = useGameSocket(BACKEND_URL);
   const [tab, setTab] = useState("play");
+  const [moreView, setMoreView] = useState("menu"); // menu | profile | transfer | invite | help
   const [lockedIn, setLockedIn] = useState(false);
   const [lockError, setLockError] = useState(null);
   const myId = myTelegramId();
 
   useEffect(() => {
     if (tab === "history") game.fetchHistory();
+    if (tab === "more") setMoreView("menu"); // reset to the menu list each time More is opened
   }, [tab]);
 
   useEffect(() => {
@@ -305,6 +519,19 @@ export default function CartelaMiniApp() {
 
             {game.phase === "WAITING" && (
               <>
+                {game.spectate && (
+                  <div className="space-y-2">
+                    <div className="text-emerald-300 text-xs font-medium px-1">
+                      Watching the current round — betting opens for the next one
+                    </div>
+                    <GameHeader
+                      drawn={game.spectate.drawnNumbers}
+                      playerCount={game.spectate.playerCount}
+                      potCents={game.spectate.potCents}
+                    />
+                  </div>
+                )}
+
                 <h1 className="text-stone-50 text-xl font-bold">Choose your Cartela</h1>
                 <RoomMetrics playerCount={game.playerCount} potCents={game.potCents} />
                 <CartelaGrid card={game.card} drawnSet={new Set()} />
@@ -351,26 +578,36 @@ export default function CartelaMiniApp() {
 
             {game.phase === "IN_PROGRESS" && (
               <>
-                <LiveTicker drawn={game.drawn} />
-                <RoomMetrics playerCount={game.playerCount} potCents={game.potCents} />
+                <GameHeader drawn={game.drawn} playerCount={game.playerCount} potCents={game.potCents} />
                 <CartelaGrid card={game.card} drawnSet={drawnSet} />
               </>
             )}
 
             {game.phase === "CLOSED" && (
               <>
-                <LiveTicker drawn={game.drawn} />
+                <GameHeader drawn={game.drawn} playerCount={game.playerCount} potCents={game.potCents} />
                 <CartelaGrid card={game.card} drawnSet={drawnSet} dimmed />
               </>
             )}
           </div>
         )}
 
+
         {tab === "wallet" && (
           <WalletView balanceCents={game.balanceCents} onDeposit={game.mockDeposit} onWithdraw={game.mockWithdraw} />
         )}
 
         {tab === "history" && <HistoryView games={game.history} />}
+
+        {tab === "more" && (
+          <>
+            {moreView === "menu" && <MoreMenu onSelect={setMoreView} myId={myId} />}
+            {moreView === "profile" && <ProfileView myId={myId} onBack={() => setMoreView("menu")} />}
+            {moreView === "transfer" && <TransferView onBack={() => setMoreView("menu")} onTransfer={game.transfer} />}
+            {moreView === "invite" && <InviteView myId={myId} onBack={() => setMoreView("menu")} />}
+            {moreView === "help" && <HelpView onBack={() => setMoreView("menu")} />}
+          </>
+        )}
       </div>
 
       <WinnerPopup winner={game.phase === "CLOSED" ? game.winner : null} myId={myId} onClose={handlePlayAgain} />
@@ -380,6 +617,7 @@ export default function CartelaMiniApp() {
           { key: "play", label: "Play", icon: Gamepad2 },
           { key: "wallet", label: "Wallet", icon: Wallet },
           { key: "history", label: "History", icon: History },
+          { key: "more", label: "More", icon: Menu },
         ].map(({ key, label, icon: Icon }) => (
           <button
             key={key}

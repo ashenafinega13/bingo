@@ -35,6 +35,15 @@ export function useGameSocket(backendUrl) {
   const [potCents, setPotCents] = useState(0);
   const [winner, setWinner] = useState(null);
   const [history, setHistory] = useState([]);
+  const [spectate, setSpectate] = useState(null); // { roomId, phase, drawnNumbers, playerCount, potCents } | null
+
+  // Refs mirror the state above so the socket handlers below (registered
+  // once, in the effect's closure) always compare against the CURRENT
+  // roomId/spectate roomId, not whatever they were when the effect ran.
+  const roomIdRef = useRef(null);
+  const spectateRoomIdRef = useRef(null);
+  useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
+  useEffect(() => { spectateRoomIdRef.current = spectate?.roomId || null; }, [spectate]);
 
   useEffect(() => {
     // window.Telegram.WebApp is injected automatically when this page is
@@ -64,26 +73,55 @@ export function useGameSocket(backendUrl) {
     });
 
     socket.on("wallet:balance", ({ balanceCents }) => setBalanceCents(balanceCents));
-    socket.on("player_count", ({ playerCount, potCents }) => {
+
+    socket.on("player_count", ({ roomId: evRoomId, playerCount, potCents }) => {
+      if (evRoomId !== roomIdRef.current) return; // not our own bet-able room, ignore
       setPlayerCount(playerCount);
       setPotCents(potCents);
     });
-    socket.on("phase_changed", ({ phase, secondsLeft }) => {
-      setPhase(phase);
-      if (secondsLeft !== undefined) setSecondsLeft(secondsLeft);
-    });
-    socket.on("countdown_tick", ({ secondsLeft }) => setSecondsLeft(secondsLeft));
-    socket.on("number_drawn", ({ drawnSoFar }) => setDrawn(drawnSoFar));
-    socket.on("winner_confirmed", (payload) => {
-      setWinner(payload);
-      setPhase("CLOSED");
-      if (payload.winnerId === getMyTelegramId()) {
-        setBalanceCents(payload.winnerNewBalanceCents);
+
+    socket.on("phase_changed", ({ roomId: evRoomId, phase: newPhase, secondsLeft: sl }) => {
+      if (evRoomId === roomIdRef.current) {
+        setPhase(newPhase);
+        if (sl !== undefined) setSecondsLeft(sl);
+      } else if (evRoomId === spectateRoomIdRef.current) {
+        setSpectate((prev) => (prev ? { ...prev, phase: newPhase } : prev));
       }
     });
-    socket.on("room_cancelled", () => {
-      setPhase("idle");
-      setRoomId(null);
+
+    socket.on("countdown_tick", ({ roomId: evRoomId, secondsLeft: sl }) => {
+      if (evRoomId === roomIdRef.current) setSecondsLeft(sl);
+    });
+
+    socket.on("number_drawn", ({ roomId: evRoomId, drawnSoFar }) => {
+      if (evRoomId === roomIdRef.current) {
+        setDrawn(drawnSoFar);
+      } else if (evRoomId === spectateRoomIdRef.current) {
+        setSpectate((prev) => (prev ? { ...prev, drawnNumbers: drawnSoFar } : prev));
+      }
+    });
+
+    socket.on("winner_confirmed", (payload) => {
+      if (payload.roomId === roomIdRef.current) {
+        setWinner(payload);
+        setPhase("CLOSED");
+        if (payload.winnerId === getMyTelegramId()) {
+          setBalanceCents(payload.winnerNewBalanceCents);
+        }
+      } else if (payload.roomId === spectateRoomIdRef.current) {
+        // The round we were only watching just ended — stop spectating.
+        // The player's own room (for the next round) is unaffected.
+        setSpectate(null);
+      }
+    });
+
+    socket.on("room_cancelled", ({ roomId: evRoomId }) => {
+      if (evRoomId === roomIdRef.current) {
+        setPhase("idle");
+        setRoomId(null);
+      } else if (evRoomId === spectateRoomIdRef.current) {
+        setSpectate(null);
+      }
     });
 
     socket.emit("tiers:list", {}, ({ tiers }) => setTiers(tiers));
@@ -104,6 +142,10 @@ export function useGameSocket(backendUrl) {
       setDrawn([]);
       setWinner(null);
       setPhase("WAITING");
+      // If a round is already live for this tier, watch it read-only —
+      // no card, no bet, no ability to win — while this new room (for
+      // the NEXT round) is what the player can actually buy a ticket in.
+      setSpectate(res.spectate || null);
     });
   }, []);
 
@@ -139,6 +181,14 @@ export function useGameSocket(backendUrl) {
     });
   }, []);
 
+  const transfer = useCallback((toTelegramId, amountBirr, onError, onSuccess) => {
+    socketRef.current?.emit("wallet:transfer", { toTelegramId, amountBirr }, (res) => {
+      if (res.error) return onError?.(res.error);
+      setBalanceCents(res.balanceCents);
+      onSuccess?.();
+    });
+  }, []);
+
   const fetchHistory = useCallback(() => {
     socketRef.current?.emit("history:get", {}, (res) => setHistory(res.games || []));
   }, []);
@@ -157,11 +207,13 @@ export function useGameSocket(backendUrl) {
     potCents,
     winner,
     history,
+    spectate,
     joinTier,
     refreshCard,
     lockIn,
     mockDeposit,
     mockWithdraw,
+    transfer,
     fetchHistory,
   };
 }

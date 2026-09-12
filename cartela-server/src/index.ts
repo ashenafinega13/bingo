@@ -76,7 +76,15 @@ io.on("connection", (socket: Socket) => {
   socket.on("tier:join", (payload: { tierKey: string }, ack) => {
     if (!TIERS[payload.tierKey]) return ack?.({ error: "Unknown tier." });
     const { roomId, card } = roomManager.joinTier(payload.tierKey, telegramId, socket);
-    ack?.({ roomId, card, balanceCents: db.getBalanceCents(telegramId) });
+    const spectate = roomManager.getSpectateSnapshot(payload.tierKey);
+    if (spectate) roomManager.joinAsSpectator(spectate.roomId, socket);
+    ack?.({ roomId, card, balanceCents: db.getBalanceCents(telegramId), spectate });
+  });
+
+  socket.on("spectate:get", (payload: { tierKey: string }, ack) => {
+    const snapshot = roomManager.getSpectateSnapshot(payload.tierKey);
+    if (snapshot) roomManager.joinAsSpectator(snapshot.roomId, socket);
+    ack?.({ snapshot });
   });
 
   socket.on("cartela:refresh", (payload: { roomId: string }, ack) => {
@@ -105,6 +113,16 @@ io.on("connection", (socket: Socket) => {
     const cents = Math.round(payload.amountBirr * 100);
     const newBalance = db.credit(telegramId, cents, "DEPOSIT", "mock");
     ack?.({ balanceCents: newBalance });
+  });
+
+  socket.on("wallet:transfer", (payload: { toTelegramId: number; amountBirr: number }, ack) => {
+    const cents = Math.round(payload.amountBirr * 100);
+    try {
+      const { senderNew } = db.transfer(telegramId, Number(payload.toTelegramId), cents);
+      ack?.({ balanceCents: senderNew });
+    } catch (e) {
+      ack?.({ error: e instanceof Error ? e.message : "Transfer failed." });
+    }
   });
 
   socket.on("wallet:mock_withdraw", (payload: { amountBirr: number }, ack) => {

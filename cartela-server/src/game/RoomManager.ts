@@ -26,7 +26,7 @@ export const TIERS: Record<string, { label: string; entryFeeCents: number }> = {
 
 const RAKE_PERCENT = 10;
 const MIN_PLAYERS_TO_START = 2;
-const SELECTION_SECONDS = 59;
+const SELECTION_SECONDS = 30;
 const DRAW_INTERVAL_MS = 1000; // spec calls for 1-number-per-second
 
 type Phase = "WAITING" | "COUNTDOWN" | "IN_PROGRESS" | "VALIDATING" | "CLOSED";
@@ -59,6 +59,7 @@ export class RoomManager {
   private io: Server;
   private openRooms = new Map<string, RoomState>(); // tierKey -> currently-joinable room
   private activeRooms = new Map<string, RoomState>(); // roomId -> any non-closed room
+  private liveGameByTier = new Map<string, string>(); // tierKey -> roomId of the currently COUNTDOWN/IN_PROGRESS round, for spectating
 
   constructor(io: Server) {
     this.io = io;
@@ -79,6 +80,31 @@ export class RoomManager {
       this.activeRooms.set(room.id, room);
     }
     return room;
+  }
+
+  /** Snapshot of whatever round is currently live for this tier, for a
+   * late joiner to watch without betting. Returns null if no round is
+   * currently running (e.g. still in the WAITING lobby, or nothing yet
+   * started today for this tier). */
+  getSpectateSnapshot(tierKey: string): {
+    roomId: string; phase: Phase; drawnNumbers: number[]; playerCount: number; potCents: number;
+  } | null {
+    const roomId = this.liveGameByTier.get(tierKey);
+    if (!roomId) return null;
+    const room = this.activeRooms.get(roomId);
+    if (!room || (room.phase !== "COUNTDOWN" && room.phase !== "IN_PROGRESS")) return null;
+    const { payout } = potFor(room);
+    return { roomId: room.id, phase: room.phase, drawnNumbers: room.drawnNumbers, playerCount: room.players.size, potCents: payout };
+  }
+
+  /** Joins a socket to a room's broadcast channel WITHOUT registering them
+   * as a player — they receive number_drawn/phase_changed/winner_confirmed
+   * events for awareness, but have no card and cannot win or be charged. */
+  joinAsSpectator(roomId: string, socket: Socket): boolean {
+    const room = this.activeRooms.get(roomId);
+    if (!room) return false;
+    socket.join(room.id);
+    return true;
   }
 
   /** Player opens the tier and gets a fresh card to preview/refresh. */
@@ -120,7 +146,8 @@ export class RoomManager {
     const lockedCount = [...room.players.values()].filter((p) => p.lockedIn).length;
     if (lockedCount >= MIN_PLAYERS_TO_START && room.phase === "WAITING") {
       room.phase = "COUNTDOWN";
-      this.openRooms.set(room.tierKey, this.getOrCreateOpenRoom(room.tierKey)); // open a fresh room for late joiners
+      this.liveGameByTier.set(room.tierKey, room.id); // this round becomes watchable by late joiners
+      this.openRooms.set(room.tierKey, this.getOrCreateOpenRoom(room.tierKey)); // open a fresh room for late joiners' own bets
       this.startCountdown(room);
     }
 
@@ -129,11 +156,11 @@ export class RoomManager {
 
   private startCountdown(room: RoomState) {
     let secondsLeft = SELECTION_SECONDS;
-    this.io.to(room.id).emit("phase_changed", { phase: "COUNTDOWN", secondsLeft });
+    this.io.to(room.id).emit("phase_changed", { roomId: room.id, phase: "COUNTDOWN", secondsLeft });
 
     room.countdownTimer = setInterval(() => {
       secondsLeft -= 1;
-      this.io.to(room.id).emit("countdown_tick", { secondsLeft });
+      this.io.to(room.id).emit("countdown_tick", { roomId: room.id, secondsLeft });
       if (secondsLeft <= 0) {
         clearInterval(room.countdownTimer);
         this.startGame(room);
@@ -151,7 +178,7 @@ export class RoomManager {
     for (const [id, p] of room.players) if (!p.lockedIn) room.players.delete(id);
 
     room.phase = "IN_PROGRESS";
-    this.io.to(room.id).emit("phase_changed", { phase: "IN_PROGRESS" });
+    this.io.to(room.id).emit("phase_changed", { roomId: room.id, phase: "IN_PROGRESS" });
     this.scheduleNextDraw(room);
   }
 
@@ -171,7 +198,7 @@ export class RoomManager {
 
     const next = remaining[Math.floor(Math.random() * remaining.length)];
     room.drawnNumbers.push(next);
-    this.io.to(room.id).emit("number_drawn", { number: next, drawnSoFar: room.drawnNumbers });
+    this.io.to(room.id).emit("number_drawn", { roomId: room.id, number: next, drawnSoFar: room.drawnNumbers });
 
     // Server-side auto-win sweep: check every player's card after every
     // draw, exactly as the spec requires — no manual claim button needed.
@@ -227,6 +254,7 @@ export class RoomManager {
     });
 
     this.io.to(room.id).emit("winner_confirmed", {
+      roomId: room.id,
       winnerId,
       pattern,
       payoutCents: payout,
@@ -235,6 +263,7 @@ export class RoomManager {
 
     room.phase = "CLOSED";
     this.activeRooms.delete(room.id);
+    if (this.liveGameByTier.get(room.tierKey) === room.id) this.liveGameByTier.delete(room.tierKey);
   }
 
   private cancelAndRefund(room: RoomState, reason: string) {
@@ -253,14 +282,16 @@ export class RoomManager {
       drawnNumbers: room.drawnNumbers,
       status: "CANCELLED",
     });
-    this.io.to(room.id).emit("room_cancelled", { reason });
+    this.io.to(room.id).emit("room_cancelled", { roomId: room.id, reason });
     room.phase = "CLOSED";
     this.activeRooms.delete(room.id);
+    if (this.liveGameByTier.get(room.tierKey) === room.id) this.liveGameByTier.delete(room.tierKey);
   }
 
   private broadcastRoomState(room: RoomState) {
     const { payout } = potFor(room);
     this.io.to(room.id).emit("player_count", {
+      roomId: room.id,
       playerCount: room.players.size,
       lockedCount: [...room.players.values()].filter((p) => p.lockedIn).length,
       potCents: payout,

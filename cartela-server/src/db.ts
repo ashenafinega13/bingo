@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
   username        TEXT,
   full_name       TEXT,
   balance_cents   INTEGER NOT NULL DEFAULT 0,
+  personal_card   TEXT,
   created_at      REAL NOT NULL
 );
 
@@ -77,12 +78,18 @@ function withTransaction<T>(fn: () => T): T {
   }
 }
 
+const SIGNUP_BONUS_CENTS = 5000; // 50 Birr, credited once on a brand-new account
+
 export function ensureUser(telegramId: number, username: string | undefined, fullName: string): void {
   const existing = db.prepare("SELECT 1 FROM users WHERE telegram_id = ?").get(telegramId);
   if (!existing) {
     db.prepare(
       "INSERT INTO users (telegram_id, username, full_name, balance_cents, created_at) VALUES (?, ?, ?, 0, ?)"
     ).run(telegramId, username || null, fullName, Date.now() / 1000);
+    // Bonus is credited as its own transaction, after the user row exists,
+    // so it goes through the exact same ledger-writing path as every other
+    // balance change — never a special-cased direct balance write.
+    credit(telegramId, SIGNUP_BONUS_CENTS, "SIGNUP_BONUS");
   }
 }
 
@@ -122,6 +129,44 @@ export function debit(telegramId: number, amountCents: number, type: string, ref
     ).run(randomUUID(), telegramId, type, amountCents, newBalance, reference || null, Date.now() / 1000);
     return newBalance;
   });
+}
+
+export function userExists(telegramId: number): boolean {
+  const row = db.prepare("SELECT 1 FROM users WHERE telegram_id = ?").get(telegramId);
+  return !!row;
+}
+
+function transferTxn(senderId: number, recipientId: number, amountCents: number) {
+  return withTransaction(() => {
+    const senderBalance = getBalanceCents(senderId);
+    if (senderBalance < amountCents) {
+      throw new InsufficientBalanceError(`Insufficient balance: have ${senderBalance}, need ${amountCents}`);
+    }
+    db.prepare("UPDATE users SET balance_cents = balance_cents - ? WHERE telegram_id = ?").run(amountCents, senderId);
+    const senderNew = getBalanceCents(senderId);
+    db.prepare(
+      `INSERT INTO ledger (id, telegram_id, type, amount_cents, balance_after, reference, created_at)
+       VALUES (?, ?, 'TRANSFER_OUT', ?, ?, ?, ?)`
+    ).run(randomUUID(), senderId, amountCents, senderNew, String(recipientId), Date.now() / 1000);
+
+    db.prepare("UPDATE users SET balance_cents = balance_cents + ? WHERE telegram_id = ?").run(amountCents, recipientId);
+    const recipientNew = getBalanceCents(recipientId);
+    db.prepare(
+      `INSERT INTO ledger (id, telegram_id, type, amount_cents, balance_after, reference, created_at)
+       VALUES (?, ?, 'TRANSFER_IN', ?, ?, ?, ?)`
+    ).run(randomUUID(), recipientId, amountCents, recipientNew, String(senderId), Date.now() / 1000);
+
+    return { senderNew, recipientNew };
+  });
+}
+
+/** Atomic peer-to-peer transfer, identified by Telegram user ID. Both users
+ * must already exist (i.e. have opened the bot/Mini App at least once). */
+export function transfer(senderId: number, recipientId: number, amountCents: number): { senderNew: number; recipientNew: number } {
+  if (senderId === recipientId) throw new Error("Cannot transfer to yourself.");
+  if (amountCents <= 0) throw new Error("Transfer amount must be positive.");
+  if (!userExists(recipientId)) throw new Error("That user hasn't started the bot yet.");
+  return transferTxn(senderId, recipientId, amountCents);
 }
 
 interface GameRecordInput {
