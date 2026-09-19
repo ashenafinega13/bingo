@@ -195,10 +195,12 @@ export function useGameSocket(backendUrl) {
     });
   }, []);
 
-  const mockWithdraw = useCallback((amountBirr, onError) => {
+  const mockWithdraw = useCallback((amountBirr, onError, onPending) => {
     socketRef.current?.emit("wallet:mock_withdraw", { amountBirr }, (res) => {
       if (res.error) return onError?.(res.error);
-      setBalanceCents(res.balanceCents);
+      // Withdrawals no longer complete instantly — they're queued for an
+      // admin to approve or reject. Balance is untouched until then.
+      onPending?.(res.requestId);
     });
   }, []);
 

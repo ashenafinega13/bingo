@@ -265,6 +265,19 @@ function WinnerPopup({ winners, myId, gameId, autoRestartSeconds, onPlayNow }) {
 
 function WalletView({ balanceCents, onDeposit, onWithdraw }) {
   const [amount, setAmount] = useState(100);
+  const [withdrawError, setWithdrawError] = useState(null);
+  const [withdrawStatus, setWithdrawStatus] = useState(null);
+
+  const handleWithdraw = () => {
+    setWithdrawError(null);
+    setWithdrawStatus(null);
+    onWithdraw(
+      amount,
+      (err) => setWithdrawError(err),
+      () => setWithdrawStatus("Withdrawal request submitted — an admin will review it shortly.")
+    );
+  };
+
   return (
     <div className="p-4 space-y-4">
       <div className="bg-gradient-to-br from-emerald-800 to-emerald-950 rounded-2xl p-6">
@@ -282,6 +295,9 @@ function WalletView({ balanceCents, onDeposit, onWithdraw }) {
         placeholder="Amount in ETB"
       />
 
+      {withdrawError && <div className="text-orange-400 text-sm">{withdrawError}</div>}
+      {withdrawStatus && <div className="text-amber-400 text-sm">{withdrawStatus}</div>}
+
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => onDeposit(amount)}
@@ -291,7 +307,7 @@ function WalletView({ balanceCents, onDeposit, onWithdraw }) {
           Deposit
         </button>
         <button
-          onClick={() => onWithdraw(amount)}
+          onClick={handleWithdraw}
           className="bg-emerald-900 text-stone-50 rounded-xl py-4 flex flex-col items-center gap-1 font-semibold"
         >
           <ArrowUpFromLine size={20} />
@@ -299,8 +315,9 @@ function WalletView({ balanceCents, onDeposit, onWithdraw }) {
         </button>
       </div>
       <div className="bg-emerald-900/60 rounded-xl p-4 text-sm text-emerald-200">
-        This deposit/withdraw is still MOCK — it credits/debits instantly on the backend for testing.
-        Real Telebirr/CBE Birr integration replaces this once you have a merchant account.
+        Deposits credit instantly for testing. Withdrawals are reviewed by an admin before your
+        balance is deducted — this may take a little time. Real Telebirr/CBE Birr integration
+        replaces the deposit side once you have a merchant account.
       </div>
     </div>
   );

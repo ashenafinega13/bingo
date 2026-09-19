@@ -61,6 +61,15 @@ CREATE TABLE IF NOT EXISTS game_participants (
   telegram_id     INTEGER NOT NULL,
   FOREIGN KEY (game_id) REFERENCES game_history(id)
 );
+
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id              TEXT PRIMARY KEY,
+  telegram_id     INTEGER NOT NULL,
+  amount_cents    INTEGER NOT NULL,
+  status          TEXT NOT NULL,   -- PENDING, APPROVED, REJECTED
+  created_at      REAL NOT NULL,
+  resolved_at     REAL
+);
 `);
 
 export class InsufficientBalanceError extends Error {}
@@ -213,6 +222,120 @@ export function getHistory(telegramId: number, limit = 10) {
        ORDER BY gh.completed_at DESC LIMIT ?`
     )
     .all(telegramId, limit);
+}
+
+// ------------------------------------------------------------------
+// Withdrawal requests — the admin panel is where these get resolved.
+// Requesting does NOT touch the balance; the deduction happens only
+// when an admin approves it (and is re-validated against the CURRENT
+// balance at that moment, since it may have changed since the request
+// was filed).
+// ------------------------------------------------------------------
+export function createWithdrawalRequest(telegramId: number, amountCents: number): string {
+  if (amountCents <= 0) throw new Error("Withdrawal amount must be positive.");
+  const balance = getBalanceCents(telegramId);
+  if (balance < amountCents) {
+    throw new InsufficientBalanceError(`Insufficient balance: have ${balance}, need ${amountCents}`);
+  }
+  const id = randomUUID();
+  db.prepare(
+    `INSERT INTO withdrawal_requests (id, telegram_id, amount_cents, status, created_at)
+     VALUES (?, ?, ?, 'PENDING', ?)`
+  ).run(id, telegramId, amountCents, Date.now() / 1000);
+  return id;
+}
+
+export function getPendingWithdrawals() {
+  return db
+    .prepare(
+      `SELECT wr.*, u.username, u.full_name FROM withdrawal_requests wr
+       JOIN users u ON u.telegram_id = wr.telegram_id
+       WHERE wr.status = 'PENDING'
+       ORDER BY wr.created_at ASC`
+    )
+    .all();
+}
+
+export function approveWithdrawal(requestId: string): number {
+  const req = db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(requestId) as
+    | { id: string; telegram_id: number; amount_cents: number; status: string }
+    | undefined;
+  if (!req) throw new Error("Withdrawal request not found.");
+  if (req.status !== "PENDING") throw new Error(`Request already ${req.status.toLowerCase()}.`);
+
+  // debit() runs its own transaction — do NOT wrap this call in another
+  // withTransaction(), node:sqlite has no nested-transaction/savepoint
+  // support the way better-sqlite3 did, and a nested BEGIN throws.
+  const newBalance = debit(req.telegram_id, req.amount_cents, "WITHDRAW", requestId);
+
+  db.prepare("UPDATE withdrawal_requests SET status = 'APPROVED', resolved_at = ? WHERE id = ?").run(
+    Date.now() / 1000, requestId
+  );
+  return newBalance;
+}
+
+export function rejectWithdrawal(requestId: string): void {
+  const req = db.prepare("SELECT status FROM withdrawal_requests WHERE id = ?").get(requestId) as
+    | { status: string }
+    | undefined;
+  if (!req) throw new Error("Withdrawal request not found.");
+  if (req.status !== "PENDING") throw new Error(`Request already ${req.status.toLowerCase()}.`);
+  db.prepare("UPDATE withdrawal_requests SET status = 'REJECTED', resolved_at = ? WHERE id = ?").run(
+    Date.now() / 1000, requestId
+  );
+}
+
+// ------------------------------------------------------------------
+// Admin dashboard queries
+// ------------------------------------------------------------------
+export function getAdminStats() {
+  const totalUsers = (db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number }).c;
+  const dayAgo = Date.now() / 1000 - 86400;
+  const newToday = (db.prepare("SELECT COUNT(*) as c FROM users WHERE created_at >= ?").get(dayAgo) as { c: number }).c;
+  const totalBalance = (db.prepare("SELECT COALESCE(SUM(balance_cents), 0) as s FROM users").get() as { s: number }).s;
+  const totalGames = (db.prepare("SELECT COUNT(*) as c FROM game_history WHERE status = 'COMPLETED'").get() as { c: number }).c;
+  const pendingWithdrawals = (db.prepare("SELECT COUNT(*) as c FROM withdrawal_requests WHERE status = 'PENDING'").get() as { c: number }).c;
+  return { totalUsers, newToday, totalBalanceCents: totalBalance, totalGames, pendingWithdrawals };
+}
+
+export function getAllUsers(limit = 50, offset = 0, search = "") {
+  if (search) {
+    const like = `%${search}%`;
+    return db
+      .prepare(
+        `SELECT telegram_id, username, full_name, balance_cents, created_at FROM users
+         WHERE CAST(telegram_id AS TEXT) LIKE ? OR username LIKE ? OR full_name LIKE ?
+         ORDER BY created_at DESC LIMIT ? OFFSET ?`
+      )
+      .all(like, like, like, limit, offset);
+  }
+  return db
+    .prepare(
+      `SELECT telegram_id, username, full_name, balance_cents, created_at FROM users
+       ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    )
+    .all(limit, offset);
+}
+
+/** Manual balance adjustment by an admin. Positive amountCents credits,
+ * negative debits (validated against current balance, same as any debit). */
+export function adminAdjustBalance(telegramId: number, amountCents: number, reason: string): number {
+  if (amountCents === 0) throw new Error("Adjustment amount cannot be zero.");
+  if (amountCents > 0) {
+    return credit(telegramId, amountCents, "ADMIN_CREDIT", reason);
+  }
+  return debit(telegramId, Math.abs(amountCents), "ADMIN_DEBIT", reason);
+}
+
+export function getReferralBonuses(limit = 50) {
+  return db
+    .prepare(
+      `SELECT l.*, u.username, u.full_name FROM ledger l
+       JOIN users u ON u.telegram_id = l.telegram_id
+       WHERE l.type = 'REFERRAL_BONUS'
+       ORDER BY l.created_at DESC LIMIT ?`
+    )
+    .all(limit);
 }
 
 export default db;

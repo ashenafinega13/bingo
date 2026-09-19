@@ -6,7 +6,7 @@
  */
 
 import "dotenv/config";
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import path from "path";
 import http from "http";
@@ -24,6 +24,78 @@ app.use(cors({ origin: CORS_ORIGIN }));
 app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// ------------------------------------------------------------------
+// Admin dashboard — protected by a shared secret, never by anything
+// tied to a Telegram identity (keeps it independent of the Mini App's
+// auth entirely). Set ADMIN_SECRET in your .env; the dashboard page
+// itself prompts for it and sends it back on every request.
+// ------------------------------------------------------------------
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!ADMIN_SECRET) {
+    return res.status(503).json({ error: "Admin dashboard is not configured (ADMIN_SECRET not set)." });
+  }
+  const provided = req.header("x-admin-secret");
+  if (provided !== ADMIN_SECRET) {
+    return res.status(401).json({ error: "Invalid admin secret." });
+  }
+  next();
+}
+
+app.get("/admin", (_req, res) => {
+  res.sendFile(path.join(__dirname, "../public/admin.html"));
+});
+
+app.get("/admin/api/stats", requireAdmin, (_req, res) => {
+  res.json(db.getAdminStats());
+});
+
+app.get("/admin/api/users", requireAdmin, (req, res) => {
+  const search = String(req.query.search || "");
+  const limit = Number(req.query.limit) || 50;
+  const offset = Number(req.query.offset) || 0;
+  res.json(db.getAllUsers(limit, offset, search));
+});
+
+app.post("/admin/api/users/:telegramId/adjust", requireAdmin, (req, res) => {
+  const telegramId = Number(req.params.telegramId);
+  const { amountBirr, reason } = req.body as { amountBirr: number; reason?: string };
+  const cents = Math.round(Number(amountBirr) * 100);
+  try {
+    const newBalance = db.adminAdjustBalance(telegramId, cents, reason || "Admin adjustment");
+    res.json({ ok: true, balanceCents: newBalance });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : "Adjustment failed." });
+  }
+});
+
+app.get("/admin/api/withdrawals", requireAdmin, (_req, res) => {
+  res.json(db.getPendingWithdrawals());
+});
+
+app.post("/admin/api/withdrawals/:id/approve", requireAdmin, (req, res) => {
+  try {
+    const newBalance = db.approveWithdrawal(req.params.id);
+    res.json({ ok: true, balanceCents: newBalance });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : "Approval failed." });
+  }
+});
+
+app.post("/admin/api/withdrawals/:id/reject", requireAdmin, (req, res) => {
+  try {
+    db.rejectWithdrawal(req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : "Rejection failed." });
+  }
+});
+
+app.get("/admin/api/referrals", requireAdmin, (_req, res) => {
+  res.json(db.getReferralBonuses());
+});
 
 // Serve the built frontend (cartela-frontend/dist) from this same server,
 // so the whole app — Mini App UI + API + WebSocket — lives behind ONE URL.
@@ -118,12 +190,15 @@ io.on("connection", (socket: Socket) => {
   });
 
   socket.on("wallet:mock_withdraw", (payload: { amountBirr: number }, ack) => {
+    // Withdrawals no longer debit instantly — they're queued for an admin
+    // to approve (which is where the actual deduction happens) or reject.
+    // The balance is untouched until that decision is made.
     const cents = Math.round(payload.amountBirr * 100);
     try {
-      const newBalance = db.debit(telegramId, cents, "WITHDRAW", "mock");
-      ack?.({ balanceCents: newBalance });
+      const requestId = db.createWithdrawalRequest(telegramId, cents);
+      ack?.({ requestId, pending: true });
     } catch (e) {
-      ack?.({ error: e instanceof InsufficientBalanceError ? "Insufficient balance." : "Withdrawal failed." });
+      ack?.({ error: e instanceof InsufficientBalanceError ? "Insufficient balance." : "Withdrawal request failed." });
     }
   });
 

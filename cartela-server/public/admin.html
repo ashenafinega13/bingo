@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Cartela Admin</title>
+<style>
+  :root {
+    --bg: #052e2b; --panel: #0b4a44; --panel2: #0e5850; --text: #f7f3e8;
+    --muted: #7fb8ae; --accent: #f2b705; --danger: #e85d3d; --ok: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 28px; }
+  .stat { background: var(--panel); border-radius: 10px; padding: 12px; }
+  .stat .label { color: var(--muted); font-size: 11px; }
+  .stat .value { font-size: 20px; font-weight: 700; font-family: monospace; }
+  section { margin-bottom: 32px; }
+  section h2 { font-size: 15px; color: var(--accent); margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #ffffff14; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  input, button { font: inherit; }
+  input[type=text], input[type=number] { background: var(--panel2); border: 1px solid #ffffff22; color: var(--text); padding: 6px 8px; border-radius: 6px; width: 100%; }
+  button { background: var(--panel2); color: var(--text); border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #052e2b; font-weight: 600; }
+  button.danger { background: var(--danger); color: white; }
+  button:hover { opacity: 0.9; }
+  .row-actions { display: flex; gap: 6px; }
+  .adjust-form { display: flex; gap: 6px; align-items: center; }
+  .adjust-form input[type=number] { width: 80px; }
+  .adjust-form input[type=text] { width: 140px; }
+  #login { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+  #login .box { background: var(--panel); padding: 28px; border-radius: 12px; width: 280px; text-align: center; }
+  #login input { margin: 12px 0; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="box">
+    <h2 style="margin-top:0">Admin Login</h2>
+    <input type="text" id="secretInput" placeholder="Admin secret" />
+    <div><button class="primary" onclick="tryLogin()" style="width:100%">Enter</button></div>
+    <div class="error" id="loginError"></div>
+  </div>
+</div>
+
+<div class="wrap" id="dashboard" style="display:none">
+  <h1>Cartela Admin Dashboard</h1>
+  <div class="sub">Manage players, balances, and withdrawal requests.</div>
+
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>Pending Withdrawals</h2>
+    <table id="withdrawalsTable">
+      <thead><tr><th>User</th><th>Amount</th><th>Requested</th><th>Action</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="withdrawalsEmpty" style="display:none">No pending withdrawal requests.</div>
+  </section>
+
+  <section>
+    <h2>Players</h2>
+    <input type="text" id="userSearch" placeholder="Search by ID, username, or name..." style="margin-bottom:10px" oninput="debouncedLoadUsers()" />
+    <table id="usersTable">
+      <thead><tr><th>Telegram ID</th><th>Username</th><th>Balance</th><th>Joined</th><th>Adjust balance</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Referral Bonuses Paid</h2>
+    <table id="referralsTable">
+      <thead><tr><th>User</th><th>Amount</th><th>Reference</th><th>Date</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="empty" id="referralsEmpty" style="display:none">No referral bonuses paid yet.</div>
+  </section>
+</div>
+
+<script>
+let ADMIN_SECRET = sessionStorage.getItem('cartela_admin_secret') || '';
+
+function birr(cents) { return (cents / 100).toFixed(2) + ' Birr'; }
+function fmtDate(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', 'x-admin-secret': ADMIN_SECRET, ...(options.headers || {}) },
+  });
+  if (res.status === 401) throw new Error('UNAUTHORIZED');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function tryLogin() {
+  ADMIN_SECRET = document.getElementById('secretInput').value.trim();
+  try {
+    await api('/admin/api/stats');
+    sessionStorage.setItem('cartela_admin_secret', ADMIN_SECRET);
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    loadAll();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'Incorrect secret. Try again.';
+  }
+}
+
+async function loadStats() {
+  const s = await api('/admin/api/stats');
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="label">Total Players</div><div class="value">${s.totalUsers}</div></div>
+    <div class="stat"><div class="label">New Today</div><div class="value">${s.newToday}</div></div>
+    <div class="stat"><div class="label">Total Balance</div><div class="value">${birr(s.totalBalanceCents)}</div></div>
+    <div class="stat"><div class="label">Games Played</div><div class="value">${s.totalGames}</div></div>
+    <div class="stat"><div class="label">Pending Withdrawals</div><div class="value">${s.pendingWithdrawals}</div></div>
+  `;
+}
+
+async function loadWithdrawals() {
+  const rows = await api('/admin/api/withdrawals');
+  const tbody = document.querySelector('#withdrawalsTable tbody');
+  document.getElementById('withdrawalsEmpty').style.display = rows.length ? 'none' : 'block';
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.username ? '@' + r.username : r.full_name} (${r.telegram_id})</td>
+      <td>${birr(r.amount_cents)}</td>
+      <td>${fmtDate(r.created_at)}</td>
+      <td class="row-actions">
+        <button class="primary" onclick="approveWithdrawal('${r.id}')">Approve</button>
+        <button class="danger" onclick="rejectWithdrawal('${r.id}')">Reject</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function approveWithdrawal(id) {
+  try { await api(`/admin/api/withdrawals/${id}/approve`, { method: 'POST' }); loadAll(); }
+  catch (e) { alert(e.message); }
+}
+async function rejectWithdrawal(id) {
+  try { await api(`/admin/api/withdrawals/${id}/reject`, { method: 'POST' }); loadAll(); }
+  catch (e) { alert(e.message); }
+}
+
+async function loadUsers() {
+  const search = document.getElementById('userSearch').value.trim();
+  const rows = await api('/admin/api/users?search=' + encodeURIComponent(search));
+  const tbody = document.querySelector('#usersTable tbody');
+  tbody.innerHTML = rows.map(u => `
+    <tr>
+      <td>${u.telegram_id}</td>
+      <td>${u.username ? '@' + u.username : (u.full_name || '—')}</td>
+      <td>${birr(u.balance_cents)}</td>
+      <td>${fmtDate(u.created_at)}</td>
+      <td>
+        <div class="adjust-form">
+          <input type="number" id="amt-${u.telegram_id}" placeholder="+/- Birr" />
+          <input type="text" id="reason-${u.telegram_id}" placeholder="Reason" />
+          <button class="primary" onclick="adjustUser(${u.telegram_id})">Apply</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+}
+
+let searchTimer;
+function debouncedLoadUsers() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadUsers, 300);
+}
+
+async function adjustUser(telegramId) {
+  const amountBirr = Number(document.getElementById(`amt-${telegramId}`).value);
+  const reason = document.getElementById(`reason-${telegramId}`).value || 'Admin adjustment';
+  if (!amountBirr) return alert('Enter a non-zero amount (positive to credit, negative to debit).');
+  try {
+    await api(`/admin/api/users/${telegramId}/adjust`, {
+      method: 'POST',
+      body: JSON.stringify({ amountBirr, reason }),
+    });
+    loadAll();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function loadReferrals() {
+  const rows = await api('/admin/api/referrals');
+  const tbody = document.querySelector('#referralsTable tbody');
+  document.getElementById('referralsEmpty').style.display = rows.length ? 'none' : 'block';
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${r.username ? '@' + r.username : r.full_name} (${r.telegram_id})</td>
+      <td>${birr(r.amount_cents)}</td>
+      <td>${r.reference || '—'}</td>
+      <td>${fmtDate(r.created_at)}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadAll() {
+  await Promise.all([loadStats(), loadWithdrawals(), loadUsers(), loadReferrals()]);
+}
+
+// Auto-login if a secret is already stored from a previous visit.
+if (ADMIN_SECRET) {
+  api('/admin/api/stats').then(() => {
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    loadAll();
+  }).catch(() => { /* stored secret no longer valid — show login again */ });
+}
+</script>
+</body>
+</html>
