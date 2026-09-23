@@ -19,9 +19,7 @@ import { WinValidator } from "./WinValidator";
 import * as db from "../db";
 
 export const TIERS: Record<string, { label: string; entryFeeCents: number }> = {
-  t20: { label: "20 Birr", entryFeeCents: 2000 },
-  t50: { label: "50 Birr", entryFeeCents: 5000 },
-  t100: { label: "100 Birr", entryFeeCents: 10000 },
+  t10: { label: "10 Birr", entryFeeCents: 1000 },
 };
 
 const RAKE_PERCENT = 10;
@@ -33,6 +31,7 @@ type Phase = "WAITING" | "COUNTDOWN" | "IN_PROGRESS" | "VALIDATING" | "CLOSED";
 
 interface Player {
   telegramId: number;
+  displayName: string;
   socketId: string;
   card: Card | null;
   cartelaNumber: number | null; // which numbered card (1..CARTELA_POOL_SIZE) they picked
@@ -121,11 +120,13 @@ export class RoomManager {
 
   /** Player opens the tier. No card is assigned yet — they must pick a
    * numbered cartela from the shared board via selectCartela(). */
-  joinTier(tierKey: string, telegramId: number, socket: Socket): {
+  joinTier(tierKey: string, telegramId: number, socket: Socket, displayName: string): {
     roomId: string; poolSize: number; taken: number[]; gameId: string;
   } {
     const room = this.getOrCreateOpenRoom(tierKey);
-    room.players.set(telegramId, { telegramId, socketId: socket.id, card: null, cartelaNumber: null, lockedIn: false });
+    room.players.set(telegramId, {
+      telegramId, displayName, socketId: socket.id, card: null, cartelaNumber: null, lockedIn: false,
+    });
     socket.join(room.id);
     return { roomId: room.id, poolSize: CARTELA_POOL_SIZE, taken: [...room.takenCartelas.keys()], gameId: shortGameId(room.id) };
   }
@@ -252,11 +253,13 @@ export class RoomManager {
     // players from this same draw (more than one card can complete on the
     // same number) so a tie splits the pot rather than only paying
     // whichever player happened to be checked first.
-    const winners: { telegramId: number; pattern: string; card: Card }[] = [];
+    const winners: { telegramId: number; displayName: string; pattern: string; card: Card }[] = [];
     for (const player of room.players.values()) {
       if (!player.card) continue;
       const result = WinValidator.validate(player.card, room.drawnNumbers);
-      if (result.won) winners.push({ telegramId: player.telegramId, pattern: result.pattern!, card: player.card });
+      if (result.won) {
+        winners.push({ telegramId: player.telegramId, displayName: player.displayName, pattern: result.pattern!, card: player.card });
+      }
     }
 
     if (winners.length > 0) {
@@ -267,7 +270,7 @@ export class RoomManager {
     this.scheduleNextDraw(room);
   }
 
-  private settleRoom(room: RoomState, winners: { telegramId: number; pattern: string; card: Card }[]) {
+  private settleRoom(room: RoomState, winners: { telegramId: number; displayName: string; pattern: string; card: Card }[]) {
     if (room.drawTimer) clearTimeout(room.drawTimer);
     const { pot, rake, payout } = potFor(room);
     const perWinner = Math.floor(payout / winners.length); // remainder (if any) stays with the house rake
@@ -296,6 +299,7 @@ export class RoomManager {
       gameId: shortGameId(room.id),
       winners: winnerResults.map((w) => ({
         telegramId: w.telegramId,
+        displayName: w.displayName,
         pattern: w.pattern,
         cartelaCard: w.card,
         payoutCents: perWinner,

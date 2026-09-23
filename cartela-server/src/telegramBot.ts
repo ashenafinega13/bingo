@@ -49,8 +49,8 @@ function toCents(amount: number): number {
 const MENU_KEYBOARD = Markup.keyboard([
   ["💰 Balance", "💵 Deposit"],
   ["💸 Withdraw", "🔁 Transfer"],
-  ["🎮 Play Bingo", "🎁 Invite"],
-  ["📖 Instructions", "❓ Help"],
+  ["🎁 Invite", "📖 Instructions"],
+  ["❓ Help"],
 ]).resize();
 
 // ----------------------------------------------------------------------
@@ -81,26 +81,62 @@ async function handleStart(ctx: any) {
 // ----------------------------------------------------------------------
 async function handleRegister(ctx: any) {
   const user = ctx.from;
-  if (db.userExists(user.id)) {
-    await ctx.reply("You're already registered! Use 💰 Balance to check your funds.");
-    return;
-  }
-  db.ensureUser(user.id, user.username, `${user.first_name} ${user.last_name || ""}`.trim());
+  const alreadyExists = db.userExists(user.id);
 
-  const referrerId = (global as any).__pendingReferrals?.[user.id];
-  if (referrerId && db.userExists(Number(referrerId))) {
-    try {
-      db.credit(Number(referrerId), 1000, "REFERRAL_BONUS", `ref:${user.id}`); // 10 Birr bonus
-    } catch {
-      /* referrer lookup failed silently — non-critical bonus, don't block registration */
+  if (!alreadyExists) {
+    db.ensureUser(user.id, user.username, `${user.first_name} ${user.last_name || ""}`.trim());
+
+    const referrerId = (global as any).__pendingReferrals?.[user.id];
+    if (referrerId && db.userExists(Number(referrerId))) {
+      try {
+        db.credit(Number(referrerId), 1000, "REFERRAL_BONUS", `ref:${user.id}`); // 10 Birr bonus
+      } catch {
+        /* referrer lookup failed silently — non-critical bonus, don't block registration */
+      }
     }
   }
 
+  const hasPhone = db.getPhoneNumber(user.id);
+  if (hasPhone) {
+    await ctx.reply("You're already registered and verified! Use 💰 Balance to check your funds.");
+    return;
+  }
+
+  // Ask for their phone number via Telegram's native contact-share prompt
+  // (a button that fills in their own number automatically — nothing is
+  // typed by hand, and Telegram only lets a user share their OWN contact
+  // this way, never someone else's). Sent as two messages rather than one
+  // combined call, since mixing parse_mode with a keyboard's reply_markup
+  // in a single spread risks depending on Markup's internal shape.
+  if (!alreadyExists) {
+    await ctx.reply(
+      `✅ Registered! Your Telegram ID is \`${user.id}\` — this is what others use to send you transfers.`,
+      { parse_mode: "Markdown" }
+    );
+  }
   await ctx.reply(
-    `✅ Registered! Your Telegram ID is \`${user.id}\` — this is what others use to send you transfers.\n\n` +
-      "Use 💵 Deposit to add funds, or 🎮 Play Bingo to jump into a game.",
-    { parse_mode: "Markdown" }
+    "One last step — please share your contact to verify your account:",
+    Markup.keyboard([Markup.button.contactRequest("📱 Share my contact")]).resize().oneTime()
   );
+}
+
+// ----------------------------------------------------------------------
+// Contact shared (in response to the 📱 Share my contact button above)
+// ----------------------------------------------------------------------
+async function handleContactShared(ctx: any) {
+  const contact = ctx.message.contact;
+  const user = ctx.from;
+
+  // Telegram only allows sharing the account's OWN contact via this
+  // button, but double-check the id matches before trusting it, in case
+  // a client ever forwards someone else's shared contact into this chat.
+  if (contact.user_id && contact.user_id !== user.id) {
+    await ctx.reply("That contact doesn't match your account — please use the Share my contact button instead.");
+    return;
+  }
+
+  db.setPhoneNumber(user.id, contact.phone_number);
+  await ctx.reply("✅ Contact verified! You're all set.", MENU_KEYBOARD);
 }
 
 // ----------------------------------------------------------------------
@@ -263,7 +299,7 @@ async function handleInstructions(ctx: any) {
       "*How to win:* The moment your card completes a full row, column, diagonal, or all four corners, " +
       "you're automatically declared the winner — first to complete a pattern takes the prize pool " +
       "(minus a small house fee).\n\n" +
-      "Tap 🎮 Play Bingo to pick a room and get started!",
+      "Use /playbingo to pick a room and get started!",
     { parse_mode: "Markdown" }
   );
 }
@@ -311,6 +347,7 @@ async function handlePlayBingo(ctx: any) {
 // ----------------------------------------------------------------------
 bot.start(handleStart);
 bot.command("register", handleRegister);
+bot.on("contact", handleContactShared);
 bot.command("balance", handleBalance);
 bot.command("deposit", handleDeposit);
 bot.command("withdraw", handleWithdraw);
@@ -326,7 +363,6 @@ bot.hears("💸 Withdraw", handleWithdraw);
 bot.hears("🔁 Transfer", (ctx) =>
   ctx.reply("Usage: `/transfer 123456789 50` — sends 50 Birr to Telegram ID 123456789.", { parse_mode: "Markdown" })
 );
-bot.hears("🎮 Play Bingo", handlePlayBingo);
 bot.hears("🎁 Invite", handleInvite);
 bot.hears("📖 Instructions", handleInstructions);
 bot.hears("❓ Help", handleHelp);
@@ -334,6 +370,23 @@ bot.hears("❓ Help", handleHelp);
 bot.catch((err, ctx) => {
   console.error(`Bot error for ${ctx.updateType}:`, err);
 });
+
+// Registers the "/" command picker's descriptions in Telegram's own UI —
+// without this, the commands above still WORK if typed manually, but
+// nothing shows up when a user taps the menu icon to browse them.
+bot.telegram.setMyCommands([
+  { command: "start", description: "Welcome & main menu" },
+  { command: "register", description: "Register for an account" },
+  { command: "balance", description: "Check your wallet balance" },
+  { command: "deposit", description: "Deposit funds (mock)" },
+  { command: "withdraw", description: "Request a withdrawal" },
+  { command: "transfer", description: "Transfer funds to another user" },
+  { command: "invite", description: "Invite your friends" },
+  { command: "instructions", description: "How to play" },
+  { command: "help", description: "Support & troubleshooting" },
+  { command: "playbingo", description: "Start playing" },
+]).then(() => console.log("Command menu registered with Telegram."))
+  .catch((e) => console.error("Failed to register command menu:", e));
 
 bot.launch();
 console.log("Telegram bot started (long polling)...");

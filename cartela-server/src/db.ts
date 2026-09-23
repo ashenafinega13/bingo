@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
   full_name       TEXT,
   balance_cents   INTEGER NOT NULL DEFAULT 0,
   personal_card   TEXT,
+  phone_number    TEXT,
   created_at      REAL NOT NULL
 );
 
@@ -71,6 +72,17 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
   resolved_at     REAL
 );
 `);
+
+// Migration for databases created before phone_number existed — the
+// CREATE TABLE above only applies to brand-new databases, so an existing
+// one (like your already-running Render deployment) needs this column
+// added explicitly. Safe to run on every startup: SQLite throws if the
+// column already exists, which we simply ignore.
+try {
+  db.exec("ALTER TABLE users ADD COLUMN phone_number TEXT;");
+} catch {
+  /* column already exists — nothing to do */
+}
 
 export class InsufficientBalanceError extends Error {}
 
@@ -143,6 +155,17 @@ export function debit(telegramId: number, amountCents: number, type: string, ref
 export function userExists(telegramId: number): boolean {
   const row = db.prepare("SELECT 1 FROM users WHERE telegram_id = ?").get(telegramId);
   return !!row;
+}
+
+export function setPhoneNumber(telegramId: number, phoneNumber: string): void {
+  db.prepare("UPDATE users SET phone_number = ? WHERE telegram_id = ?").run(phoneNumber, telegramId);
+}
+
+export function getPhoneNumber(telegramId: number): string | null {
+  const row = db.prepare("SELECT phone_number FROM users WHERE telegram_id = ?").get(telegramId) as
+    | { phone_number: string | null }
+    | undefined;
+  return row?.phone_number ?? null;
 }
 
 function transferTxn(senderId: number, recipientId: number, amountCents: number) {
@@ -303,7 +326,7 @@ export function getAllUsers(limit = 50, offset = 0, search = "") {
     const like = `%${search}%`;
     return db
       .prepare(
-        `SELECT telegram_id, username, full_name, balance_cents, created_at FROM users
+        `SELECT telegram_id, username, full_name, phone_number, balance_cents, created_at FROM users
          WHERE CAST(telegram_id AS TEXT) LIKE ? OR username LIKE ? OR full_name LIKE ?
          ORDER BY created_at DESC LIMIT ? OFFSET ?`
       )
@@ -311,7 +334,7 @@ export function getAllUsers(limit = 50, offset = 0, search = "") {
   }
   return db
     .prepare(
-      `SELECT telegram_id, username, full_name, balance_cents, created_at FROM users
+      `SELECT telegram_id, username, full_name, phone_number, balance_cents, created_at FROM users
        ORDER BY created_at DESC LIMIT ? OFFSET ?`
     )
     .all(limit, offset);

@@ -69,7 +69,7 @@
     <h2>Players</h2>
     <input type="text" id="userSearch" placeholder="Search by ID, username, or name..." style="margin-bottom:10px" oninput="debouncedLoadUsers()" />
     <table id="usersTable">
-      <thead><tr><th>Telegram ID</th><th>Username</th><th>Balance</th><th>Joined</th><th>Adjust balance</th></tr></thead>
+      <thead><tr><th>Telegram ID</th><th>Username</th><th>Phone</th><th>Balance</th><th>Joined</th><th>Adjust balance</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -159,6 +159,7 @@ async function loadUsers() {
     <tr>
       <td>${u.telegram_id}</td>
       <td>${u.username ? '@' + u.username : (u.full_name || '—')}</td>
+      <td>${u.phone_number || '—'}</td>
       <td>${birr(u.balance_cents)}</td>
       <td>${fmtDate(u.created_at)}</td>
       <td>

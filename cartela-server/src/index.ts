@@ -133,6 +133,10 @@ io.use((socket: Socket, next) => {
   console.log(`[connection accepted] socket ${socket.id}: telegram user ${verified.user.id} (${verified.user.username || "no username"})`);
   db.ensureUser(verified.user.id, verified.user.username, verified.user.first_name);
   socket.data.telegramId = verified.user.id;
+  // First name is what a "Welcome, X!" or "X won!" message should show —
+  // falls back to username, then a generic label, in the rare case
+  // Telegram doesn't supply a first name.
+  socket.data.displayName = verified.user.first_name || verified.user.username || "Player";
   next();
 });
 
@@ -147,7 +151,7 @@ io.on("connection", (socket: Socket) => {
 
   socket.on("tier:join", (payload: { tierKey: string }, ack) => {
     if (!TIERS[payload.tierKey]) return ack?.({ error: "Unknown tier." });
-    const { roomId, poolSize, taken, gameId } = roomManager.joinTier(payload.tierKey, telegramId, socket);
+    const { roomId, poolSize, taken, gameId } = roomManager.joinTier(payload.tierKey, telegramId, socket, socket.data.displayName);
     const spectate = roomManager.getSpectateSnapshot(payload.tierKey);
     if (spectate) roomManager.joinAsSpectator(spectate.roomId, socket);
     ack?.({ roomId, poolSize, taken, gameId, balanceCents: db.getBalanceCents(telegramId), spectate });

@@ -22,6 +22,11 @@ function myTelegramId() {
   return window?.Telegram?.WebApp?.initDataUnsafe?.user?.id;
 }
 
+function myDisplayName() {
+  const user = window?.Telegram?.WebApp?.initDataUnsafe?.user;
+  return user?.first_name || user?.username || null;
+}
+
 function BallChip({ number, size = "lg", bounce = false }) {
   const dims = size === "lg" ? "w-20 h-20 text-3xl" : "w-11 h-11 text-sm";
   const letter = numberLetter(number);
@@ -200,8 +205,10 @@ function RoomMetrics({ playerCount, potCents }) {
 
 function TierSelect({ tiers, onSelect }) {
   const entries = Object.entries(tiers);
+  const name = myDisplayName();
   return (
     <div className="space-y-3">
+      {name && <div className="text-emerald-300 text-sm">Welcome, {name}!</div>}
       <h1 className="text-stone-50 text-xl font-bold">Choose a room</h1>
       {entries.length === 0 && <div className="text-emerald-400 text-sm">Connecting to server...</div>}
       {entries.map(([key, info]) => (
@@ -230,7 +237,7 @@ function WinnerPopup({ winners, myId, gameId, autoRestartSeconds, onPlayNow }) {
       <div className="bg-stone-50 rounded-2xl max-w-sm w-full p-6 text-center relative">
         <div className="text-5xl mb-2">🏆</div>
         <h2 className="text-emerald-950 text-xl font-bold mb-1" style={{ fontFamily: "'Sora', sans-serif" }}>
-          BINGO! {multi ? `${winners.length} players won!` : iWon ? "You won!" : "We have a winner!"}
+          BINGO! {multi ? `${winners.length} players won!` : iWon ? "You won!" : `${winners[0].displayName || "A player"} won!`}
         </h2>
         {gameId && <p className="text-emerald-500 text-xs mb-3">Game {gameId}</p>}
 
@@ -243,7 +250,7 @@ function WinnerPopup({ winners, myId, gameId, autoRestartSeconds, onPlayNow }) {
                 className={`rounded-xl p-3 flex items-center justify-between ${isMe ? "bg-amber-100 ring-2 ring-amber-400" : "bg-emerald-50"}`}
               >
                 <div className="text-left">
-                  <div className="font-semibold text-emerald-950">{isMe ? "You" : `Player ${w.telegramId}`}</div>
+                  <div className="font-semibold text-emerald-950">{isMe ? "You" : w.displayName || `Player ${w.telegramId}`}</div>
                   <div className="text-emerald-600 text-xs">{w.pattern}</div>
                 </div>
                 <div className="font-bold text-emerald-900" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
