@@ -52,23 +52,28 @@ const CardGenerator_1 = require("./CardGenerator");
 const WinValidator_1 = require("./WinValidator");
 const db = __importStar(require("../db"));
 exports.TIERS = {
-    t20: { label: "20 Birr", entryFeeCents: 2000 },
-    t50: { label: "50 Birr", entryFeeCents: 5000 },
-    t100: { label: "100 Birr", entryFeeCents: 10000 },
+    t10: { label: "10 Birr", entryFeeCents: 1000 },
 };
 const RAKE_PERCENT = 10;
 const MIN_PLAYERS_TO_START = 2;
 const SELECTION_SECONDS = 59;
-const DRAW_INTERVAL_MS = 1000; // spec calls for 1-number-per-second
+const DRAW_INTERVAL_MS = 1000; // 1 number per second, per spec
 function potFor(room) {
-    const pot = room.entryFeeCents * room.players.size;
+    const lockedCount = [...room.players.values()].filter((p) => p.lockedIn).length;
+    const pot = room.entryFeeCents * lockedCount;
     const rake = Math.floor((pot * RAKE_PERCENT) / 100);
     return { pot, rake, payout: pot - rake };
+}
+function shortGameId(roomId) {
+    // Room ids are internally verbose (room_t20_172839...); show players a
+    // short, stable, human-shareable code instead of the raw id.
+    return roomId.slice(-8).toUpperCase();
 }
 class RoomManager {
     constructor(io) {
         this.openRooms = new Map(); // tierKey -> currently-joinable room
         this.activeRooms = new Map(); // roomId -> any non-closed room
+        this.liveGameByTier = new Map(); // tierKey -> roomId of the currently COUNTDOWN/IN_PROGRESS round, for spectating
         this.io = io;
     }
     getOrCreateOpenRoom(tierKey) {
@@ -80,6 +85,7 @@ class RoomManager {
                 entryFeeCents: exports.TIERS[tierKey].entryFeeCents,
                 phase: "WAITING",
                 players: new Map(),
+                takenCartelas: new Map(),
                 drawnNumbers: [],
             };
             this.openRooms.set(tierKey, room);
@@ -87,25 +93,74 @@ class RoomManager {
         }
         return room;
     }
-    /** Player opens the tier and gets a fresh card to preview/refresh. */
-    joinTier(tierKey, telegramId, socket) {
-        const room = this.getOrCreateOpenRoom(tierKey);
-        const card = CardGenerator_1.CardGenerator.generate();
-        room.players.set(telegramId, { telegramId, socketId: socket.id, card, lockedIn: false });
-        socket.join(room.id);
-        return { roomId: room.id, card };
+    /** Snapshot of whatever round is currently live for this tier, for a
+     * late joiner to watch without betting. Returns null if no round is
+     * currently running. */
+    getSpectateSnapshot(tierKey) {
+        const roomId = this.liveGameByTier.get(tierKey);
+        if (!roomId)
+            return null;
+        const room = this.activeRooms.get(roomId);
+        if (!room || (room.phase !== "COUNTDOWN" && room.phase !== "IN_PROGRESS"))
+            return null;
+        const { payout } = potFor(room);
+        return {
+            roomId: room.id, phase: room.phase, drawnNumbers: room.drawnNumbers,
+            playerCount: room.players.size, potCents: payout, gameId: shortGameId(room.id),
+        };
     }
-    refreshCard(roomId, telegramId) {
+    /** Joins a socket to a room's broadcast channel WITHOUT registering them
+     * as a player — they receive live events for awareness, but have no
+     * card and cannot win or be charged. */
+    joinAsSpectator(roomId, socket) {
+        const room = this.activeRooms.get(roomId);
+        if (!room)
+            return false;
+        socket.join(room.id);
+        return true;
+    }
+    /** Player opens the tier. No card is assigned yet — they must pick a
+     * numbered cartela from the shared board via selectCartela(). */
+    joinTier(tierKey, telegramId, socket, displayName) {
+        const room = this.getOrCreateOpenRoom(tierKey);
+        room.players.set(telegramId, {
+            telegramId, displayName, socketId: socket.id, card: null, cartelaNumber: null, lockedIn: false,
+        });
+        socket.join(room.id);
+        return { roomId: room.id, poolSize: CardGenerator_1.CARTELA_POOL_SIZE, taken: [...room.takenCartelas.keys()], gameId: shortGameId(room.id) };
+    }
+    /** Books a specific numbered cartela for this player, releasing any
+     * cartela they'd previously picked in this room. Fails if the number is
+     * already held by someone else, or the room has moved past WAITING. */
+    selectCartela(roomId, telegramId, cartelaNumber) {
         const room = this.activeRooms.get(roomId);
         if (!room || room.phase !== "WAITING")
-            return null;
+            return { ok: false, error: "This room already started." };
+        if (cartelaNumber < 1 || cartelaNumber > CardGenerator_1.CARTELA_POOL_SIZE)
+            return { ok: false, error: "Invalid cartela number." };
         const player = room.players.get(telegramId);
-        if (!player || player.lockedIn)
-            return null;
-        player.card = CardGenerator_1.CardGenerator.generate();
-        return player.card;
+        if (!player)
+            return { ok: false, error: "You're not in this room." };
+        if (player.lockedIn)
+            return { ok: false, error: "Already locked in — can't change cartela now." };
+        const holder = room.takenCartelas.get(cartelaNumber);
+        if (holder !== undefined && holder !== telegramId) {
+            return { ok: false, error: "That cartela is already taken. Pick another." };
+        }
+        // Release whatever this player had picked before, if anything.
+        if (player.cartelaNumber !== null && player.cartelaNumber !== cartelaNumber) {
+            room.takenCartelas.delete(player.cartelaNumber);
+            this.io.to(room.id).emit("cartela_released", { roomId: room.id, cartelaNumber: player.cartelaNumber });
+        }
+        const card = CardGenerator_1.CardGenerator.generateFixed(cartelaNumber);
+        player.card = card;
+        player.cartelaNumber = cartelaNumber;
+        room.takenCartelas.set(cartelaNumber, telegramId);
+        this.io.to(room.id).emit("cartela_taken", { roomId: room.id, cartelaNumber, telegramId });
+        return { ok: true, card };
     }
-    /** Locks in the ticket: debits the entry fee and starts the countdown once enough players are in. */
+    /** Locks in the ticket: debits the entry fee. Requires a cartela to
+     * already be selected. Starts the countdown once enough players are in. */
     lockIn(roomId, telegramId) {
         const room = this.activeRooms.get(roomId);
         if (!room || room.phase !== "WAITING")
@@ -115,6 +170,8 @@ class RoomManager {
             return { ok: false, error: "You're not in this room." };
         if (player.lockedIn)
             return { ok: false, error: "Already locked in." };
+        if (player.cartelaNumber === null || !player.card)
+            return { ok: false, error: "Pick a cartela number first." };
         let newBalance;
         try {
             newBalance = db.debit(telegramId, room.entryFeeCents, "TICKET_PURCHASE", roomId);
@@ -127,17 +184,18 @@ class RoomManager {
         const lockedCount = [...room.players.values()].filter((p) => p.lockedIn).length;
         if (lockedCount >= MIN_PLAYERS_TO_START && room.phase === "WAITING") {
             room.phase = "COUNTDOWN";
-            this.openRooms.set(room.tierKey, this.getOrCreateOpenRoom(room.tierKey)); // open a fresh room for late joiners
+            this.liveGameByTier.set(room.tierKey, room.id); // this round becomes watchable by late joiners
+            this.openRooms.set(room.tierKey, this.getOrCreateOpenRoom(room.tierKey)); // fresh room for late joiners' own bets
             this.startCountdown(room);
         }
         return { ok: true, balance: newBalance };
     }
     startCountdown(room) {
         let secondsLeft = SELECTION_SECONDS;
-        this.io.to(room.id).emit("phase_changed", { phase: "COUNTDOWN", secondsLeft });
+        this.io.to(room.id).emit("phase_changed", { roomId: room.id, phase: "COUNTDOWN", secondsLeft });
         room.countdownTimer = setInterval(() => {
             secondsLeft -= 1;
-            this.io.to(room.id).emit("countdown_tick", { secondsLeft });
+            this.io.to(room.id).emit("countdown_tick", { roomId: room.id, secondsLeft });
             if (secondsLeft <= 0) {
                 clearInterval(room.countdownTimer);
                 this.startGame(room);
@@ -150,12 +208,18 @@ class RoomManager {
             this.cancelAndRefund(room, "Not enough players locked in.");
             return;
         }
-        // Drop anyone who previewed but never locked in — they were never charged.
-        for (const [id, p] of room.players)
-            if (!p.lockedIn)
+        // Drop anyone who picked a cartela / previewed but never actually paid
+        // for a ticket — they were never charged, so nothing to refund, and
+        // their cartela reservation (if any) is released back to the pool.
+        for (const [id, p] of room.players) {
+            if (!p.lockedIn) {
+                if (p.cartelaNumber !== null)
+                    room.takenCartelas.delete(p.cartelaNumber);
                 room.players.delete(id);
+            }
+        }
         room.phase = "IN_PROGRESS";
-        this.io.to(room.id).emit("phase_changed", { phase: "IN_PROGRESS" });
+        this.io.to(room.id).emit("phase_changed", { roomId: room.id, phase: "IN_PROGRESS" });
         this.scheduleNextDraw(room);
     }
     scheduleNextDraw(room) {
@@ -163,7 +227,7 @@ class RoomManager {
     }
     drawNumber(room) {
         if (room.phase !== "IN_PROGRESS")
-            return; // paused for a claim, or already closed
+            return; // paused for settlement, or already closed
         const remaining = [];
         for (let n = 1; n <= 75; n++)
             if (!room.drawnNumbers.includes(n))
@@ -174,43 +238,37 @@ class RoomManager {
         }
         const next = remaining[Math.floor(Math.random() * remaining.length)];
         room.drawnNumbers.push(next);
-        this.io.to(room.id).emit("number_drawn", { number: next, drawnSoFar: room.drawnNumbers });
-        // Server-side auto-win sweep: check every player's card after every
-        // draw, exactly as the spec requires — no manual claim button needed.
+        this.io.to(room.id).emit("number_drawn", {
+            roomId: room.id, number: next, drawnSoFar: room.drawnNumbers, calledCount: room.drawnNumbers.length,
+        });
+        // Server-side auto-win sweep after every draw. Collects ALL matching
+        // players from this same draw (more than one card can complete on the
+        // same number) so a tie splits the pot rather than only paying
+        // whichever player happened to be checked first.
+        const winners = [];
         for (const player of room.players.values()) {
+            if (!player.card)
+                continue;
             const result = WinValidator_1.WinValidator.validate(player.card, room.drawnNumbers);
             if (result.won) {
-                this.settleRoom(room, player.telegramId, result.pattern);
-                return; // stop the loop the instant a winner is found
+                winners.push({ telegramId: player.telegramId, displayName: player.displayName, pattern: result.pattern, card: player.card });
             }
+        }
+        if (winners.length > 0) {
+            this.settleRoom(room, winners);
+            return;
         }
         this.scheduleNextDraw(room);
     }
-    /** Kept for a Mini App variant that still shows a manual claim button; unused by the auto-win flow above but validated the same way. */
-    claimBingo(roomId, telegramId) {
-        const room = this.activeRooms.get(roomId);
-        if (!room || room.phase !== "IN_PROGRESS")
-            return { valid: false, message: "Game is not active." };
-        const player = room.players.get(telegramId);
-        if (!player)
-            return { valid: false, message: "You're not in this room." };
-        room.phase = "VALIDATING";
-        if (room.drawTimer)
-            clearTimeout(room.drawTimer);
-        const result = WinValidator_1.WinValidator.validate(player.card, room.drawnNumbers);
-        if (!result.won) {
-            room.phase = "IN_PROGRESS";
-            this.scheduleNextDraw(room);
-            return { valid: false, message: "Not a valid BINGO yet." };
-        }
-        this.settleRoom(room, telegramId, result.pattern);
-        return { valid: true, pattern: result.pattern, message: `BINGO confirmed: ${result.pattern}` };
-    }
-    settleRoom(room, winnerId, pattern) {
+    settleRoom(room, winners) {
         if (room.drawTimer)
             clearTimeout(room.drawTimer);
         const { pot, rake, payout } = potFor(room);
-        const newBalance = db.credit(winnerId, payout, "GAME_WIN", room.id);
+        const perWinner = Math.floor(payout / winners.length); // remainder (if any) stays with the house rake
+        const winnerResults = winners.map((w) => ({
+            ...w,
+            newBalance: db.credit(w.telegramId, perWinner, "GAME_WIN", room.id),
+        }));
         db.recordGame({
             roomId: room.id,
             tierKey: room.tierKey,
@@ -219,57 +277,81 @@ class RoomManager {
             potCents: pot,
             rakeCents: rake,
             payoutCents: payout,
-            winnerId,
-            winningPattern: pattern,
+            winnerId: winners[0].telegramId, // primary winner on record; full split is in the broadcast/ledger
+            winningPattern: winners.map((w) => w.pattern).join(", "),
             drawnNumbers: room.drawnNumbers,
             status: "COMPLETED",
         });
         this.io.to(room.id).emit("winner_confirmed", {
-            winnerId,
-            pattern,
-            payoutCents: payout,
-            winnerNewBalanceCents: newBalance,
+            roomId: room.id,
+            gameId: shortGameId(room.id),
+            winners: winnerResults.map((w) => ({
+                telegramId: w.telegramId,
+                displayName: w.displayName,
+                pattern: w.pattern,
+                cartelaCard: w.card,
+                payoutCents: perWinner,
+                newBalanceCents: w.newBalance,
+            })),
         });
         room.phase = "CLOSED";
         this.activeRooms.delete(room.id);
+        if (this.liveGameByTier.get(room.tierKey) === room.id)
+            this.liveGameByTier.delete(room.tierKey);
     }
     cancelAndRefund(room, reason) {
         if (room.drawTimer)
             clearTimeout(room.drawTimer);
+        // IMPORTANT: only refund players who actually PAID (lockedIn) — anyone
+        // who merely picked a cartela but never locked in was never charged,
+        // so crediting them here would hand out money they never spent.
         for (const player of room.players.values()) {
-            db.credit(player.telegramId, room.entryFeeCents, "REFUND", room.id);
+            if (player.lockedIn) {
+                db.credit(player.telegramId, room.entryFeeCents, "REFUND", room.id);
+            }
         }
         db.recordGame({
             roomId: room.id,
             tierKey: room.tierKey,
             entryFeeCents: room.entryFeeCents,
-            playerIds: [...room.players.keys()],
+            playerIds: [...room.players.keys()].filter((id) => room.players.get(id).lockedIn),
             potCents: 0,
             rakeCents: 0,
             payoutCents: 0,
             drawnNumbers: room.drawnNumbers,
             status: "CANCELLED",
         });
-        this.io.to(room.id).emit("room_cancelled", { reason });
+        this.io.to(room.id).emit("room_cancelled", { roomId: room.id, reason });
         room.phase = "CLOSED";
         this.activeRooms.delete(room.id);
+        if (this.liveGameByTier.get(room.tierKey) === room.id)
+            this.liveGameByTier.delete(room.tierKey);
     }
     broadcastRoomState(room) {
         const { payout } = potFor(room);
         this.io.to(room.id).emit("player_count", {
+            roomId: room.id,
+            gameId: shortGameId(room.id),
             playerCount: room.players.size,
             lockedCount: [...room.players.values()].filter((p) => p.lockedIn).length,
             potCents: payout,
+            entryFeeCents: room.entryFeeCents,
         });
     }
-    /** Called when a socket disconnects — cleans up a player who never locked in. */
+    /** Called when a socket disconnects — cleans up a player who never
+     * locked in, releasing any cartela they'd reserved. */
     handleDisconnect(socketId) {
         for (const room of this.activeRooms.values()) {
             if (room.phase !== "WAITING")
                 continue;
             for (const [id, p] of room.players) {
-                if (p.socketId === socketId && !p.lockedIn)
+                if (p.socketId === socketId && !p.lockedIn) {
+                    if (p.cartelaNumber !== null) {
+                        room.takenCartelas.delete(p.cartelaNumber);
+                        this.io.to(room.id).emit("cartela_released", { roomId: room.id, cartelaNumber: p.cartelaNumber });
+                    }
                     room.players.delete(id);
+                }
             }
         }
     }

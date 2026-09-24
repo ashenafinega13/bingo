@@ -58,6 +58,71 @@ const app = (0, express_1.default)();
 app.use((0, cors_1.default)({ origin: CORS_ORIGIN }));
 app.use(express_1.default.json());
 app.get("/health", (_req, res) => res.json({ ok: true }));
+// ------------------------------------------------------------------
+// Admin dashboard — protected by a shared secret, never by anything
+// tied to a Telegram identity (keeps it independent of the Mini App's
+// auth entirely). Set ADMIN_SECRET in your .env; the dashboard page
+// itself prompts for it and sends it back on every request.
+// ------------------------------------------------------------------
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+function requireAdmin(req, res, next) {
+    if (!ADMIN_SECRET) {
+        return res.status(503).json({ error: "Admin dashboard is not configured (ADMIN_SECRET not set)." });
+    }
+    const provided = req.header("x-admin-secret");
+    if (provided !== ADMIN_SECRET) {
+        return res.status(401).json({ error: "Invalid admin secret." });
+    }
+    next();
+}
+app.get("/admin", (_req, res) => {
+    res.sendFile(path_1.default.join(__dirname, "../public/admin.html"));
+});
+app.get("/admin/api/stats", requireAdmin, (_req, res) => {
+    res.json(db.getAdminStats());
+});
+app.get("/admin/api/users", requireAdmin, (req, res) => {
+    const search = String(req.query.search || "");
+    const limit = Number(req.query.limit) || 50;
+    const offset = Number(req.query.offset) || 0;
+    res.json(db.getAllUsers(limit, offset, search));
+});
+app.post("/admin/api/users/:telegramId/adjust", requireAdmin, (req, res) => {
+    const telegramId = Number(req.params.telegramId);
+    const { amountBirr, reason } = req.body;
+    const cents = Math.round(Number(amountBirr) * 100);
+    try {
+        const newBalance = db.adminAdjustBalance(telegramId, cents, reason || "Admin adjustment");
+        res.json({ ok: true, balanceCents: newBalance });
+    }
+    catch (e) {
+        res.status(400).json({ error: e instanceof Error ? e.message : "Adjustment failed." });
+    }
+});
+app.get("/admin/api/withdrawals", requireAdmin, (_req, res) => {
+    res.json(db.getPendingWithdrawals());
+});
+app.post("/admin/api/withdrawals/:id/approve", requireAdmin, (req, res) => {
+    try {
+        const newBalance = db.approveWithdrawal(req.params.id);
+        res.json({ ok: true, balanceCents: newBalance });
+    }
+    catch (e) {
+        res.status(400).json({ error: e instanceof Error ? e.message : "Approval failed." });
+    }
+});
+app.post("/admin/api/withdrawals/:id/reject", requireAdmin, (req, res) => {
+    try {
+        db.rejectWithdrawal(req.params.id);
+        res.json({ ok: true });
+    }
+    catch (e) {
+        res.status(400).json({ error: e instanceof Error ? e.message : "Rejection failed." });
+    }
+});
+app.get("/admin/api/referrals", requireAdmin, (_req, res) => {
+    res.json(db.getReferralBonuses());
+});
 // Serve the built frontend (cartela-frontend/dist) from this same server,
 // so the whole app — Mini App UI + API + WebSocket — lives behind ONE URL.
 // This avoids needing two separate ngrok tunnels (or two separate hosted
@@ -76,13 +141,23 @@ const roomManager = new RoomManager_1.RoomManager(io);
 // instead of anything the client sends in the event payload.
 io.use((socket, next) => {
     const initData = socket.handshake.auth?.initData;
-    if (!initData)
+    console.log(`[connection attempt] socket ${socket.id}, initData present: ${!!initData}, length: ${initData?.length || 0}`);
+    if (!initData) {
+        console.log(`[connection rejected] socket ${socket.id}: no initData provided`);
         return next(new Error("Missing initData"));
+    }
     const verified = (0, auth_1.verifyInitData)(initData);
-    if (!verified)
+    if (!verified) {
+        console.log(`[connection rejected] socket ${socket.id}: initData failed verification`);
         return next(new Error("Invalid or expired initData"));
+    }
+    console.log(`[connection accepted] socket ${socket.id}: telegram user ${verified.user.id} (${verified.user.username || "no username"})`);
     db.ensureUser(verified.user.id, verified.user.username, verified.user.first_name);
     socket.data.telegramId = verified.user.id;
+    // First name is what a "Welcome, X!" or "X won!" message should show —
+    // falls back to username, then a generic label, in the rare case
+    // Telegram doesn't supply a first name.
+    socket.data.displayName = verified.user.first_name || verified.user.username || "Player";
     next();
 });
 io.on("connection", (socket) => {
@@ -94,23 +169,24 @@ io.on("connection", (socket) => {
     socket.on("tier:join", (payload, ack) => {
         if (!RoomManager_1.TIERS[payload.tierKey])
             return ack?.({ error: "Unknown tier." });
-        const { roomId, card } = roomManager.joinTier(payload.tierKey, telegramId, socket);
-        ack?.({ roomId, card, balanceCents: db.getBalanceCents(telegramId) });
+        const { roomId, poolSize, taken, gameId } = roomManager.joinTier(payload.tierKey, telegramId, socket, socket.data.displayName);
+        const spectate = roomManager.getSpectateSnapshot(payload.tierKey);
+        if (spectate)
+            roomManager.joinAsSpectator(spectate.roomId, socket);
+        ack?.({ roomId, poolSize, taken, gameId, balanceCents: db.getBalanceCents(telegramId), spectate });
     });
-    socket.on("cartela:refresh", (payload, ack) => {
-        const card = roomManager.refreshCard(payload.roomId, telegramId);
-        if (!card)
-            return ack?.({ error: "Can't refresh right now." });
-        ack?.({ card });
+    socket.on("spectate:get", (payload, ack) => {
+        const snapshot = roomManager.getSpectateSnapshot(payload.tierKey);
+        if (snapshot)
+            roomManager.joinAsSpectator(snapshot.roomId, socket);
+        ack?.({ snapshot });
+    });
+    socket.on("cartela:select", (payload, ack) => {
+        const result = roomManager.selectCartela(payload.roomId, telegramId, payload.cartelaNumber);
+        ack?.(result);
     });
     socket.on("cartela:lock", (payload, ack) => {
         const result = roomManager.lockIn(payload.roomId, telegramId);
-        ack?.(result);
-    });
-    // Kept for a UI variant with a manual claim button — the RoomManager's
-    // automatic sweep after every draw is what the spec's auto-win flow uses.
-    socket.on("bingo:claim", (payload, ack) => {
-        const result = roomManager.claimBingo(payload.roomId, telegramId);
         ack?.(result);
     });
     socket.on("wallet:mock_deposit", (payload, ack) => {
@@ -122,14 +198,27 @@ io.on("connection", (socket) => {
         const newBalance = db.credit(telegramId, cents, "DEPOSIT", "mock");
         ack?.({ balanceCents: newBalance });
     });
-    socket.on("wallet:mock_withdraw", (payload, ack) => {
+    socket.on("wallet:transfer", (payload, ack) => {
         const cents = Math.round(payload.amountBirr * 100);
         try {
-            const newBalance = db.debit(telegramId, cents, "WITHDRAW", "mock");
-            ack?.({ balanceCents: newBalance });
+            const { senderNew } = db.transfer(telegramId, Number(payload.toTelegramId), cents);
+            ack?.({ balanceCents: senderNew });
         }
         catch (e) {
-            ack?.({ error: e instanceof db_1.InsufficientBalanceError ? "Insufficient balance." : "Withdrawal failed." });
+            ack?.({ error: e instanceof Error ? e.message : "Transfer failed." });
+        }
+    });
+    socket.on("wallet:mock_withdraw", (payload, ack) => {
+        // Withdrawals no longer debit instantly — they're queued for an admin
+        // to approve (which is where the actual deduction happens) or reject.
+        // The balance is untouched until that decision is made.
+        const cents = Math.round(payload.amountBirr * 100);
+        try {
+            const requestId = db.createWithdrawalRequest(telegramId, cents);
+            ack?.({ requestId, pending: true });
+        }
+        catch (e) {
+            ack?.({ error: e instanceof db_1.InsufficientBalanceError ? "Insufficient balance." : "Withdrawal request failed." });
         }
     });
     socket.on("history:get", (_payload, ack) => {

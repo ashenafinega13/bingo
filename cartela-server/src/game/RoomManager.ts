@@ -24,7 +24,7 @@ export const TIERS: Record<string, { label: string; entryFeeCents: number }> = {
 
 const RAKE_PERCENT = 10;
 const MIN_PLAYERS_TO_START = 2;
-const SELECTION_SECONDS = 30;
+const SELECTION_SECONDS = 59;
 const DRAW_INTERVAL_MS = 1000; // 1 number per second, per spec
 
 type Phase = "WAITING" | "COUNTDOWN" | "IN_PROGRESS" | "VALIDATING" | "CLOSED";

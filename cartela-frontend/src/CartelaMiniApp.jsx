@@ -210,7 +210,7 @@ function TierSelect({ tiers, onSelect }) {
     <div className="space-y-3">
       {name && <div className="text-emerald-300 text-sm">Welcome, {name}!</div>}
       <h1 className="text-stone-50 text-xl font-bold">Choose a room</h1>
-      {entries.length === 0 && <div className="text-emerald-400 text-sm">Connecting to server...</div>}
+      {entries.length === 0 && <div className="text-emerald-400 text-sm">No rooms available right now.</div>}
       {entries.map(([key, info]) => (
         <button
           key={key}
@@ -610,22 +610,50 @@ export default function CartelaMiniApp() {
     if (currentTierKey) game.joinTier(currentTierKey);
   };
 
+  // Connection is ready once the socket has authenticated AND the tier
+  // list has arrived. With exactly one tier configured, skip the
+  // "choose a room" tap entirely and land straight on whatever the real
+  // state is — cartela selection, a live game to watch, or gameplay
+  // already in progress — instead of an intermediate screen.
+  const tierKeys = Object.keys(game.tiers);
+  const isReady = game.connected && tierKeys.length > 0;
+
+  useEffect(() => {
+    if (isReady && tierKeys.length === 1 && game.phase === "idle" && !currentTierKey) {
+      handleJoinTier(tierKeys[0]);
+    }
+  }, [isReady, game.phase]);
+
+  if (!isReady) {
+    return (
+      <div className="min-h-screen w-full bg-emerald-950 flex flex-col items-center justify-center gap-3 px-6 text-center">
+        {game.connectError ? (
+          <>
+            <div className="text-orange-400 text-sm font-medium">Couldn't connect</div>
+            <div className="text-emerald-400 text-xs">{game.connectError}</div>
+          </>
+        ) : (
+          <div className="w-10 h-10 border-4 border-emerald-700 border-t-amber-400 rounded-full animate-spin" />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-emerald-950 flex flex-col max-w-md mx-auto" style={{ fontFamily: "'Sora', sans-serif" }}>
+    <div className="min-h-screen w-full bg-emerald-950 flex flex-col" style={{ fontFamily: "'Sora', sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
       `}</style>
 
-      {!game.connected && (
-        <div className="bg-orange-500 text-emerald-950 text-center text-sm py-1 font-medium px-2">
-          {game.connectError ? `Connection failed: ${game.connectError}` : "Connecting to server..."}
-        </div>
-      )}
-
       <div className="flex-1 overflow-y-auto pb-20">
         {tab === "play" && (
           <div className="p-4 space-y-4">
-            {game.phase === "idle" && <TierSelect tiers={game.tiers} onSelect={handleJoinTier} />}
+            {game.phase === "idle" && tierKeys.length > 1 && <TierSelect tiers={game.tiers} onSelect={handleJoinTier} />}
+            {game.phase === "idle" && tierKeys.length <= 1 && (
+              <div className="flex items-center justify-center py-20">
+                <div className="w-8 h-8 border-4 border-emerald-700 border-t-amber-400 rounded-full animate-spin" />
+              </div>
+            )}
 
             {game.phase === "WAITING" && (
               <>
@@ -766,7 +794,7 @@ export default function CartelaMiniApp() {
         onPlayNow={handlePlayNow}
       />
 
-      <div className="fixed bottom-0 inset-x-0 max-w-md mx-auto bg-emerald-900 border-t border-emerald-800 flex">
+      <div className="fixed bottom-0 inset-x-0 bg-emerald-900 border-t border-emerald-800 flex">
         {[
           { key: "play", label: "Play", icon: Gamepad2 },
           { key: "wallet", label: "Wallet", icon: Wallet },
